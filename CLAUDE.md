@@ -1,6 +1,8 @@
 # TSConf_MiSTer: dual-VHD fork (local)
 
-This is a local clone of MiSTer-devel/TSConf_MiSTer (upstream head `1f61dc5`, 2026-11-04). The work is on branch `dual-vhd`. The task is in **`docs/TASK-dual-vhd.md`**: start it only when the owner says so.
+This is a local clone of MiSTer-devel/TSConf_MiSTer (upstream head `1f61dc5`, 2026-11-04). The work is on branch `dual-vhd`. Tasks, each started only when the owner says so:
+- **`docs/TASK-dual-vhd.md`**: a second SD image slot (do this first).
+- **`docs/TASK-neogs.md`**: NeoGS support (plan proposal; phase 3 builds on dual-VHD's slot wiring).
 
 ## How the owner works (binding)
 

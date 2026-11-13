@@ -14,8 +14,8 @@
 
 - Code in `tools/tsshare/` (package `main`), commits `share: what`, branch `tsshare`, local only, no push. Do not touch `sys/`, `rtl/`, `TSConf.sv`, `spikes/`.
 - **Names:** Main_MiSTer treats any `*.zip` as a folder and any path containing `.zip` as zipped, so the view never shows a name containing `.zip` (case-insensitive): a zip `X.zip` is shown as `X.vhd`; two zips mapping to the same shown name (case-insensitive) get ` (2)`, ` (3)` before `.vhd`; mirrored directories whose name contains `.zip` are skipped with a log line. Hidden names (`.x`) are skipped. Only directories, `*.zip` files and `shared.vhd` are shown. The view excludes its own mount point and the shared directory.
-- **Defaults:** MaxVolumes 3, idle TTL 10 minutes, listing cache 5 seconds, existing flag defaults (`-cache-mb 32`, `-mem-limit-mb 192`, `-max-entries 250000`).
-- **Never hang:** every FUSE request is answered; build errors fail that open only (EIO), panics recovered, `EBUSY` when three volumes are leased; existing shutdown/exit-code rules unchanged. Read-only: writes return EROFS.
+- **Defaults:** MaxVolumes 2 (was 3; superseded by `-max-volumes`, default 2, range 1..3, for memory), idle TTL 10 minutes, listing cache 5 seconds, existing flag defaults (`-cache-mb 32`, `-mem-limit-mb 192`, `-max-entries 250000`).
+- **Never hang:** every FUSE request is answered; build errors fail that open only (EIO), panics recovered, `EBUSY` when `-max-volumes` volumes are leased; existing shutdown/exit-code rules unchanged. Read-only: writes return EROFS.
 - **Size semantics:** before a volume is built a zip entry reports the real zip's size; after `Open` the built volume's size (attribute caching disabled for these nodes so `fstat` on the open handle returns the built size); `shared.vhd` reports the built size when open, else the last known size or 0.
 - Board rules as in `CLAUDE.md` and `~/repo/MiSTer_docs`; the board test is Task 4 and needs the owner's presence.
 - No core rebuild: the extension list stays `VHD` (design rev 2).
@@ -41,7 +41,7 @@
   ```go
   type SourceSpec struct{ Path string; Zip bool } // Zip: file is a zip; else a directory
   type ManagerOptions struct {
-      MaxVolumes int            // default 3
+      MaxVolumes int            // default 2 (was 3)
       IdleTTL    time.Duration  // default 10m
       Source     SourceOptions  // passed to OpenSource
       Volume     VolumeOptions  // passed to NewVolume (Label etc.)

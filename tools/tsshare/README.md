@@ -155,11 +155,19 @@ browsing), never a disk.
   waits: 17 s for the 57,353-entry zip on the board, 0.4 s on the host. The
   volume is kept afterwards: reopening within the idle time (10 minutes by
   default, `-idle-min`) is instant. After that the memory is released.
-- At most 3 sources are built at once; a fourth open fails with `EBUSY` (the OSD
-  shows an error) until one of them has been idle long enough to go.
-- Memory per source: about 45 to 50 MB for the big zip.
-  A small zip or folder costs little. Peak memory with several big zips on the
-  board has not been measured.
+- At most `-max-volumes` sources (default 2, 1 to 3) are alive at once. An idle
+  volume is evicted on demand to make room, so opening a new source while the
+  old one is still mounted works (one leased plus one being built). An open
+  fails with `EBUSY` (the OSD shows an error) only when that many sources are
+  leased (held open) or being built.
+- Memory per source: about 45 to 50 MB of tree and extent tables for the big zip,
+  plus a zip cache of up to `-cache-mb` (32 MB by default) of inflated entries
+  while the image is open. The cache is dropped when the last handle of a source
+  closes; the tree stays for the idle time, so a quick reopen is still instant
+  (entries are inflated again on demand). Worst case with the defaults: two
+  volumes of about 47 MB plus one cache of at most 32 MB, about 126 MB.
+  A small zip or folder costs little. Peak memory in view mode on the board has
+  not been measured.
 
 ## Known limits of view mode
 
@@ -212,6 +220,7 @@ tsshare -view <zip-root> [-shared <dir>] -mount <dir> [...] view mode
 | `-src` | required (or `-view`) | folder or `.zip` to share (single mode) |
 | `-view` | none | view mode: root folder whose zips appear as `<name>.vhd`; excludes `-src` |
 | `-shared` | `<view>/shared` | view mode: folder shown as `shared.vhd`; created if missing; the mount point must not lie inside it |
+| `-max-volumes` | 2 | view mode: volumes alive at once (leased or being built), 1 to 3; more means more memory |
 | `-idle-min` | 10 | view mode: minutes an unused volume is kept; 1 to 1440 |
 | `-mount` | required | existing directory to mount on |
 | `-label` | `TSSHARE` | FAT volume label |
@@ -279,8 +288,11 @@ Measured on the build host with the real 1.4 GB zip (57,353 files; see
 end of a long verification session. The defaults (`-cache-mb 32`, soft limit
 `-mem-limit-mb 192`) were lowered from 64 MB after that work; the board has
 491 MB RAM, shared with Main_MiSTer and the system, and `/tmp` is a RAM disk.
-Peak memory on the board has not been measured. View mode keeps up to 3
-such sources at once for the idle time (see "Cost in view mode").
+On the board (single mode, [docs/BOARD.md](docs/BOARD.md)) VmHWM was 42.9 MB
+after the scan and 47.2 MB after about 15 minutes of use. Memory in view mode
+on the board is not measured yet. View mode keeps up to `-max-volumes` (default
+2) such trees alive at once, and frees a volume's zip cache when its last handle
+closes (see "Cost in view mode").
 
 ## Exit codes
 
@@ -348,8 +360,8 @@ containing `.zip`, second start refused, stop unmounts, a missing zip root
 refused). It is NOT verified on the board yet. The board test will check: that the
 OSD picker lists the `share` folder and the `.vhd` names and mounts one; that Wild
 Commander reads a zip volume and `shared.vhd`; the first-open pause (17 s was
-measured for single mode); the idle release after 10 minutes; the 3-source limit
-on the board's memory; the view over the NAS-backed `games/TSConf`; the start and
+measured for single mode); the idle release after 10 minutes; the 2-volume limit
+(`-max-volumes`) and memory in view mode; the view over the NAS-backed `games/TSConf`; the start and
 stop scripts under BusyBox with the new defaults.
 
 Verified on the owner's board (2026-11-13, single mode, details in [docs/BOARD.md](docs/BOARD.md)):

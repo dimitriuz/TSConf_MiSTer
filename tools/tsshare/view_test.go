@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1130,5 +1131,195 @@ func TestViewGetattrUsesListingCache(t *testing.T) {
 	}
 	if n := stats.Load(); n != 2 {
 		t.Fatalf("Getattr on a handle stat'ed the zip (%d)", n)
+	}
+}
+
+// ---- final fix wave: FUSE-level robustness ----
+
+// TestViewZipRewrittenUnderOpenImage: a zip rewritten in place while its image
+// is open must never give wrong bytes; reads fail with EIO, and the next open
+// rebuilds from the new zip.
+func TestViewZipRewrittenUnderOpenImage(t *testing.T) {
+	needFuse(t)
+	needTool(t, "mdir", "mcopy")
+	e := newViewEnv(t)
+	zp := filepath.Join(e.root, "A.zip")
+	orig, err := os.ReadFile(zp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refZip := filepath.Join(t.TempDir(), "ref.zip")
+	mkfile(t, refZip, orig)
+	ref := startDaemon(t, refZip)
+	rf, err := os.Open(ref.vhd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rf.Close()
+
+	f, err := os.Open(e.p("A.vhd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	// rewrite in place (same inode, new size)
+	nz := filepath.Join(t.TempDir(), "new.zip")
+	writeZipFile(t, nz, map[string][]byte{"new.txt": bytes.Repeat([]byte("N"), 40000)})
+	nb, _ := os.ReadFile(nz)
+	w, err := os.OpenFile(zp, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write(nb)
+	w.Close()
+	time.Sleep(checkInterval + 300*time.Millisecond)
+
+	const chunk = 64 << 10
+	bad, good := 0, 0
+	for off := int64(0); off < 4<<20; off += chunk {
+		got := make([]byte, chunk)
+		want := make([]byte, chunk)
+		if _, err := rf.ReadAt(want, off); err != nil {
+			t.Fatal(err)
+		}
+		n, err := f.ReadAt(got, off)
+		if err != nil {
+			if !errors.Is(err, syscall.EIO) {
+				t.Fatalf("read at %d: %v, want EIO", off, err)
+			}
+			bad++
+			continue
+		}
+		if n != chunk || !bytes.Equal(got, want) {
+			t.Fatalf("wrong bytes at %d after the zip changed", off)
+		}
+		good++
+	}
+	if bad == 0 {
+		t.Fatalf("no read failed after the zip was rewritten (%d good chunks)", good)
+	}
+	f.Close()
+	// the next open rebuilds from the new zip
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		l := mdirList(t, e.p("A.vhd"))
+		if strings.Join(l, "|") == "new.txt" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("listing after reopen: %v", l)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if g := mcopyOut(t, e.p("A.vhd"), "::new.txt"); !bytes.Equal(g, bytes.Repeat([]byte("N"), 40000)) {
+		t.Fatal("new.txt differs")
+	}
+}
+
+// TestViewSpecialFiles: FIFOs, sockets, device nodes and a directory named
+// x.zip in the zip root never block the listing or an open and are not shown.
+func TestViewSpecialFiles(t *testing.T) {
+	needFuse(t)
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	writeZipFile(t, filepath.Join(root, "good.zip"), aFiles)
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe.zip"), 0o644); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	syscall.Mkfifo(filepath.Join(root, "plainpipe"), 0o644)
+	if l, err := net.Listen("unix", filepath.Join(root, "sock.zip")); err == nil {
+		defer l.Close()
+	} else {
+		t.Logf("socket: %v", err)
+	}
+	if err := syscall.Mknod(filepath.Join(root, "dev.zip"), syscall.S_IFCHR|0o600, 1<<8|3); err != nil {
+		t.Logf("mknod: %v (needs root; skipped)", err)
+	}
+	os.Mkdir(filepath.Join(root, "x.zip"), 0o755)
+	writeZipFile(t, filepath.Join(root, "x.zip", "inner.zip"), aFiles)
+	mnt := filepath.Join(root, "share")
+	os.Mkdir(mnt, 0o755)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		startView(t, mnt, root, "-view", root, "-mount", mnt)
+		got := dirNames(t, mnt)
+		if strings.Join(got, "|") != "good.vhd|shared.vhd" {
+			t.Errorf("listing %v", got)
+		}
+		for _, n := range []string{"pipe.vhd", "sock.vhd", "dev.vhd", "x.vhd", "plainpipe", "pipe.zip"} {
+			if err := openErr(filepath.Join(mnt, n)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("open %s: %v, want ENOENT", n, err)
+			}
+		}
+		if err := openErr(filepath.Join(mnt, "good.vhd")); err != nil {
+			t.Errorf("good.vhd: %v", err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("blocked on a special file in the zip root")
+	}
+}
+
+// TestViewShutdownWithOpenHandle: SIGTERM with a handle open: the clean
+// unmount fails, the daemon unmounts lazily, the handle stays readable, and the
+// daemon exits when the handle is closed. A second signal exits with 1.
+func TestViewShutdownWithOpenHandle(t *testing.T) {
+	needFuse(t)
+	for _, second := range []bool{false, true} {
+		name := "close handle"
+		if second {
+			name = "second signal"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newViewEnv(t)
+			f, err := os.Open(e.p("A.vhd"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			before := make([]byte, 4096)
+			if _, err := f.ReadAt(before, 0); err != nil {
+				t.Fatal(err)
+			}
+			e.d.cmd.Process.Signal(syscall.SIGTERM)
+			deadline := time.Now().Add(5 * time.Second)
+			for isMounted(e.mnt) {
+				if time.Now().After(deadline) {
+					t.Fatalf("mount not detached after SIGTERM\n%s", e.d.sb)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			select {
+			case err := <-e.d.done:
+				t.Fatalf("daemon exited while a handle is open: %v\n%s", err, e.d.sb)
+			case <-time.After(300 * time.Millisecond):
+			}
+			after := make([]byte, 4096)
+			if _, err := f.ReadAt(after, 0); err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("handle unreadable after the lazy unmount: %v", err)
+			}
+			if second {
+				e.d.cmd.Process.Signal(syscall.SIGTERM)
+			} else {
+				f.Close()
+			}
+			select {
+			case err := <-e.d.done:
+				if second && exitCode(err) != 1 {
+					t.Fatalf("exit code %d, want 1\n%s", exitCode(err), e.d.sb)
+				}
+				if !second && exitCode(err) != 0 {
+					t.Fatalf("exit code %d after the handle closed\n%s", exitCode(err), e.d.sb)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("daemon did not exit\n%s", e.d.sb)
+			}
+			if !strings.Contains(e.d.sb.String(), "lazy unmount") {
+				t.Errorf("no lazy unmount logged:\n%s", e.d.sb)
+			}
+		})
 	}
 }

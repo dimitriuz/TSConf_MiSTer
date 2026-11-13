@@ -57,7 +57,10 @@ set_multicycle_path -from $sdram_sources -to $sdram_keepers -setup 3
 set_multicycle_path -from $sdram_sources -to $sdram_keepers -hold 2
 
 set spi_keepers    [get_keepers -no_duplicates -nowarn {*|spi:spi|*}]
-set sdcard_keepers [get_keepers -no_duplicates -nowarn {*|sd_card:sd_card|*}]
+set sdcard_keepers [get_keepers -no_duplicates -nowarn {
+	*|sd_card:sd_card0|*
+	*|sd_card:sd_card1|*
+}]
 if {[get_collection_size $spi_keepers] == 0 || [get_collection_size $sdcard_keepers] == 0} { error "TSConf.sdc: SPI-to-SD multicycle endpoints were not found" }
 set_multicycle_path -from $spi_keepers -to $sdcard_keepers -setup 3
 set_multicycle_path -from $spi_keepers -to $sdcard_keepers -hold 2

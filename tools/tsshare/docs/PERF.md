@@ -78,7 +78,7 @@ RSS at the milestones (final binary): 52-58 MB right after the scan (the
 scan's garbage is returned to the OS; HWM 57.9 MB); 135 MB after one full read;
 **145.5 MB** (HWM at exit) after the whole verification session, which in
 addition did a second full read, `fsck`, a Python pass over all 57,353 entries and
-`mdir -/`. With `-cache-mb 32`: 97.6 MB after a full read.
+`mdir -/`. With `-cache-mb 32`: 99.6 MB after a full read.
 
 `fsck.vfat -n` on the extracted 3.4 GiB partition (0.8 s), exact output, exit 0:
 

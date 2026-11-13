@@ -165,6 +165,8 @@ fi
 
 mkdir -p "$MOUNT" || die "cannot create" "$MOUNT"
 mkdir -p "$CONF_DIR" || die "cannot create" "$CONF_DIR"
+# without a log file the daemon would never start: say why (read-only or full SD card?)
+( : > "$LOG" ) 2>/dev/null || die "cannot create the log file (read-only or full SD card?)" "$LOG"
 
 echo "Sharing: ${SRC##*/}" | cut -c1-60
 echo "Scanning (up to ${WAIT_SECS}s)..."

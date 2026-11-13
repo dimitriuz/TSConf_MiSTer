@@ -209,6 +209,11 @@ mkdir -p "$T/ne"; : > "$T/ne/tsshare"
 check "non-executable BIN" 1 -- env BIN="$T/ne/tsshare" sh "$START" "$T/src"
 expect "non-executable message" has "not executable"
 
+check "unwritable LOG" 1 -- env LOG="$T/no/such/dir/tsshare.log" sh "$START" "$T/src"
+expect "unwritable LOG message" has "read-only or full SD card"
+not_mounted_ok() { not_mounted && no_pidfile; }
+expect "unwritable LOG leaves nothing running" not_mounted_ok
+
 check "start (folder)" 0 -- sh "$START" "$T/src"
 expect "summary has OK" has "^OK"
 expect "summary has geometry" has "sectors/cluster"

@@ -18,7 +18,22 @@ LOG="${LOG:-$CONF_DIR/tsshare.log}"
 PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-90}"
 # MOUNTS_FILE: see the lib below
+# BIN must be named exactly "tsshare": the scripts recognise the daemon
+# by that name. MOUNT: use the real path (symlinked parents are not resolved).
 # -----------------------------------------------------------------------
+
+# normalise MOUNT: no trailing slashes; refuse "" and "/". A symlinked
+# parent directory is not resolved (/proc/mounts shows the real path):
+# give the real path.
+while [ "${MOUNT%/}" != "$MOUNT" ] && [ -n "${MOUNT%/}" ]; do
+	MOUNT="${MOUNT%/}"
+done
+case "$MOUNT" in
+"" | /)
+	echo "ERROR: MOUNT must be a directory, not / or empty"
+	exit 1
+	;;
+esac
 
 [ -n "$1" ] && SRC="$1"
 
@@ -109,6 +124,7 @@ show_log() {
 	[ -f "$LOG" ] && tail -n 4 "$LOG" | cut -c1-60
 }
 
+[ "${BIN##*/}" = tsshare ] || die "BIN must be named tsshare:" "$BIN"
 [ -f "$BIN" ] || die "no daemon at" "$BIN"
 [ -x "$BIN" ] || die "not executable (chmod +x):" "$BIN"
 [ -e "$SRC" ] || die "source not found:" "$SRC"
@@ -150,7 +166,7 @@ fi
 mkdir -p "$MOUNT" || die "cannot create" "$MOUNT"
 mkdir -p "$CONF_DIR" || die "cannot create" "$CONF_DIR"
 
-echo "Sharing: ${SRC##*/}"
+echo "Sharing: ${SRC##*/}" | cut -c1-60
 echo "Scanning (up to ${WAIT_SECS}s)..."
 setsid nohup "$BIN" -src "$SRC" -mount "$MOUNT" -cache-mb "$CACHE_MB" \
 	-label "$LABEL" > "$LOG" 2>&1 < /dev/null &

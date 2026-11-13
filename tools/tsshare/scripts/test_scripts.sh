@@ -42,11 +42,12 @@ z.writestr("dir/x.txt","x"*5000)
 z.close()' "$T/test.zip"
 fi
 
-export MOUNT BIN
+export MOUNT BIN T
 export CONF_DIR="$T/conf" LOG="$T/conf/tsshare.log" PIDFILE="$T/conf/tsshare.pid"
 export CACHE_MB=8 WAIT_SECS=20
 START="$HERE/tsshare_start.sh"
 STOP="$HERE/tsshare_stop.sh"
+export STOP
 FAILS=0
 
 # check NAME EXPECTED_STATUS -- command...
@@ -141,6 +142,57 @@ check "stop after fake" 0 -- sh "$STOP"
 expect "fake survived again" kill -0 "$FAKE"
 kill -KILL "$UNREL" "$FAKE" 2>/dev/null
 
+# processes that must never be signalled. Symlinks to sh give argv[0]
+# basenames; "-c LOOP" then positional words, so the cmdline holds the words.
+mkdir -p "$T/fake2"
+ln -s "$(command -v sh)" "$T/fake2/tsshare"
+ln -s "$(command -v sh)" "$T/fake2/other"
+LOOP='while :; do sleep 1; done'
+spare() { # spare NAME_IN_fake2 WORDS... : runs it in the background, sets FP
+	_n="$1"; shift
+	"$T/fake2/$_n" -c "$LOOP" "$@" &
+	FP=$!
+	HELPERS="$HELPERS $FP"
+}
+survives() { # survives LABEL PID: stop must call the pid file stale and spare it
+	echo "$2" > "$PIDFILE"
+	check "stop spares: $1" 0 -- sh "$STOP"
+	expect "$1: reported stale" has "stale"
+	expect "$1: still alive" kill -0 "$2"
+	kill -KILL "$2" 2>/dev/null
+}
+spare other -mount "$MOUNT"
+survives "argv0 is not tsshare (other -mount MOUNT)" "$FP"
+spare tsshare x "$MOUNT"
+survives "tsshare MOUNT without -mount" "$FP"
+spare tsshare "-mount=$MOUNT"
+survives "-mount=MOUNT form (start always uses the space form)" "$FP"
+# the stop script's own parent, dressed up as the daemon
+rm -f "$T/ppid.alive"
+"$T/fake2/tsshare" -c 'echo $$ > "$PIDFILE"; sh "$STOP" > "$T/ppid.out" 2>&1; echo done > "$T/ppid.alive"' -mount "$MOUNT"
+expect "stop did not kill its parent" test -f "$T/ppid.alive"
+expect "parent: reported stale" grep -q stale "$T/ppid.out"
+
+# BIN must be named tsshare
+cp "$BIN" "$T/tsshare_bin"
+check "BIN with another name" 1 -- env BIN="$T/tsshare_bin" sh "$START" "$T/src"
+expect "BIN name message" has "must be named"
+expect "nothing started (no pid file)" no_pidfile
+expect "nothing mounted" not_mounted
+# MOUNT with trailing slashes, and refused values
+check "start with MOUNT/ (trailing slash)" 0 -- env MOUNT="$MOUNT//" sh "$START" "$T/src"
+expect "mounted at the clean path" mounted
+check "stop with MOUNT/" 0 -- env MOUNT="$MOUNT/" sh "$STOP"
+expect "unmounted after stop with MOUNT/" not_mounted
+check "MOUNT=/ refused" 1 -- env MOUNT=/ sh "$START" "$T/src"
+check "MOUNT=/ refused by stop" 1 -- env MOUNT=/ sh "$STOP"
+# a very long source name stays within 60 columns
+LN="$(printf 'n%.0s' $(seq 1 90))"
+mkdir "$T/$LN"
+check "long source name" 0 -- sh "$START" "$T/$LN"
+expect "long name: no line over 60 columns" test -z "$(echo "$LAST" | grep -v '^Log:' | awk 'length($0) > 60')"
+sh "$STOP" > /dev/null 2>&1
+
 # output width: no line longer than 60 columns (paths of the temp dir excluded)
 check "width probe" 0 -- sh "$START" "$T/src"
 LONG="$(echo "$LAST" | grep -v "^Log:" | awk 'length($0) > 60')"
@@ -150,10 +202,11 @@ sh "$STOP" > /dev/null 2>&1
 check "stop with nothing running" 0 -- sh "$STOP"
 check "bad SRC" 1 -- sh "$START" "$T/nonexistent"
 expect "bad SRC message" has "source not found"
-check "missing BIN" 1 -- env BIN="$T/nobin" sh "$START" "$T/src"
+check "missing BIN" 1 -- env BIN="$T/nb/tsshare" sh "$START" "$T/src"
 expect "missing BIN message" has "no daemon"
 : > "$T/notexec"
-check "non-executable BIN" 1 -- env BIN="$T/notexec" sh "$START" "$T/src"
+mkdir -p "$T/ne"; : > "$T/ne/tsshare"
+check "non-executable BIN" 1 -- env BIN="$T/ne/tsshare" sh "$START" "$T/src"
 expect "non-executable message" has "not executable"
 
 check "start (folder)" 0 -- sh "$START" "$T/src"

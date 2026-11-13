@@ -47,8 +47,15 @@ The scripts only unmount a mount at `MOUNT` whose filesystem type is
 `fuse.tsshare`; any other filesystem mounted there makes the start script
 refuse, and the stop script leave it alone.
 
+The binary must be named exactly `tsshare`: `tsshare_start.sh` refuses any
+other `BIN` name, because both scripts recognise the daemon by that name.
+`MOUNT` is used with trailing slashes removed; `/` and an empty value are
+refused. Give the real path: a symlinked parent directory is not resolved, the
+daemon mounts at the given path while `/proc/mounts` shows the resolved one,
+and the scripts would then not see the mount.
+
 A process is treated as the daemon only if its command name is `tsshare`, it
-has `-mount <MOUNT>`, and it is not the script itself or its parent. The pid
+has `-mount <MOUNT>`, it is not the script itself or its parent, and `-mount` is a separate word (the start script always launches with `-mount <dir>`; the `-mount=<dir>` form is not recognised). The pid
 file sits on the SD card and survives a power cycle: if the number in it is
 dead or belongs to something else, both scripts say "Removed stale pid file"
 and never signal that process.

@@ -9,6 +9,7 @@ CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-10}"
 # MOUNTS_FILE: see the lib below
+# MOUNT: use the real path (symlinked parents are not resolved).
 # --------------------------------------------------------
 
 # ---- BEGIN lib (identical in start and stop; test_scripts.sh diffs it) ----
@@ -88,6 +89,19 @@ scan_pid() {
 }
 # ---- END lib ----
 
+# normalise MOUNT: no trailing slashes; refuse "" and "/". A symlinked
+# parent directory is not resolved (/proc/mounts shows the real path):
+# give the real path.
+while [ "${MOUNT%/}" != "$MOUNT" ] && [ -n "${MOUNT%/}" ]; do
+	MOUNT="${MOUNT%/}"
+done
+case "$MOUNT" in
+"" | /)
+	echo "ERROR: MOUNT must be a directory, not / or empty"
+	exit 1
+	;;
+esac
+
 # wait up to $1 seconds until the process is gone and the mount is gone
 wait_down() {
 	n=0
@@ -142,10 +156,10 @@ else
 	fi
 	if ! wait_down 3; then
 		echo "Still alive: sending TERM again."
-		kill -TERM "$PID" 2>/dev/null
+		is_ours "$PID" && kill -TERM "$PID" 2>/dev/null
 		if ! wait_down 3; then
 			echo "Still alive: sending KILL."
-			kill -KILL "$PID" 2>/dev/null
+			is_ours "$PID" && kill -KILL "$PID" 2>/dev/null
 			sleep 1
 		fi
 		is_mounted && lazy_umount "$MOUNT"

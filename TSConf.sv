@@ -474,8 +474,8 @@ assign DDRAM_DIN      = 0;
 assign DDRAM_BE       = 0;
 assign DDRAM_WE       = 0;
 
-assign LED_USER = (|vsd_sel & sd_act) | ioctl_download;
-assign LED_DISK = {1'b1, ~|vsd_sel & sd_act};
+assign LED_USER = sd_act_v | ioctl_download;
+assign LED_DISK = {1'b1, sd_act_p};
 
 //////////////////   VIDEO   ///////////////////
 reg [7:0] R_r,G_r,B_r;
@@ -635,19 +635,33 @@ assign SD_CS = (vsd_sel == 2'b00) ? sdss :
 assign SD_SCK = sdclk & ~SD_CS;
 assign SD_MOSI = sdmosi & ~SD_CS;
 
-reg sd_act;
+wire virt_sel = (vsd_sel[0] & !sdss) | (vsd_sel[1] & !sdss2);
+wire phys_sel = !SD_CS;
+
+reg sd_act_v, sd_act_p;
 always @(posedge clk_sys) begin
 	reg old_mosi,old_miso;
-	integer activity_timeout = 0;
+	integer activity_timeout_v = 0;
+	integer activity_timeout_p = 0;
 	old_mosi <= sdmosi;
 	old_miso <= sdmiso;
 
-	sd_act <= 0;
-	if(activity_timeout < 1000000) begin
-		activity_timeout <= activity_timeout + 1;
-		sd_act <= 1;
+	sd_act_v <= 0;
+	if(activity_timeout_v < 1000000) begin
+		activity_timeout_v <= activity_timeout_v + 1;
+		sd_act_v <= 1;
 	end
-	if((old_mosi ^ sdmosi) || (old_miso ^ sdmiso)) activity_timeout <= 0;
+
+	sd_act_p <= 0;
+	if(activity_timeout_p < 1000000) begin
+		activity_timeout_p <= activity_timeout_p + 1;
+		sd_act_p <= 1;
+	end
+
+	if((old_mosi ^ sdmosi) || (old_miso ^ sdmiso)) begin
+		if(virt_sel) activity_timeout_v <= 0;
+		if(phys_sel) activity_timeout_p <= 0;
+	end
 end
 
 endmodule

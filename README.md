@@ -43,6 +43,7 @@ See details in the official git repository: [link](https://github.com/tslabs/zx-
 * RTC
 * Configurable CMOS settings through OSD
 * Two SD cards can be used simultaneously: card #1 is a VHD stored on MiSTer's primary SD card, and card #2 is the physical secondary SD card. Without a mounted VHD, the physical secondary SD card becomes card #1
+* Mount SD2 image: a second VHD as card #2; the physical secondary SD card is used only for a card slot with no image mounted.
 * Two configurable joysticks supporting 8-bit Kempston, Sinclair, Cursor, and QAOPM modes
 * Kempston mouse with wheel support and an option to swap the buttons
 * Keyboard mapping matching ZX Evolution

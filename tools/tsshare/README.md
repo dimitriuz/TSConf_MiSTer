@@ -9,8 +9,9 @@ names included.
 
 Why: large collections (10+ GB, tens of thousands of files, zips) live on a
 NAS the MiSTer already mounts. Copying them to the SD card or building an image
-by hand is slow and goes stale. With tsshare the "image" is built in memory in
-about a second from a scan of the tree, and file data is read from the source
+by hand is slow and goes stale. With tsshare the "image" is built in memory
+from a scan of the tree (0.4 s for the real 57,353-file zip on the host; estimated
+2 to 4 s on the board, not yet measured, see the board test), and file data is read from the source
 only when the core asks for it. No change to Main_MiSTer, `sys/` or the RTL.
 
 Status: tested on the build host only. Nothing has been run on the board yet;
@@ -89,8 +90,14 @@ for `share.vhd`, and stops early with the log tail if the daemon dies.
 5. Folder sources keep a small LRU of open file descriptors (`-fd-limit`).
 6. `share.vhd` is mode 0444 and opened with direct I/O (one source read per
    request, no kernel readahead); writes return EROFS.
-7. Every FUSE request is answered: errors become EIO, panics are caught per
-   request, so a bad source cannot hang Main_MiSTer.
+7. The daemon answers every request it can: errors become EIO and panics are
+   caught per request. It has no per-read deadline, though. A source that is
+   slow or stuck (an NFS hard mount, a CIFS reconnect) stalls the `ReadAt`, so
+   Main_MiSTer's read blocks and the OSD freezes until the share answers;
+   reading a zip entry larger than the cache backwards re-inflates it from the
+   start. Mitigations: keep the source on local storage when possible, the
+   in-memory cache (`-cache-mb`), and the abort recipe below. A per-read
+   timeout is not implemented.
 8. SIGINT/SIGTERM unmount (lazily if busy); a second signal forces a lazy
    unmount and exit.
 9. The Go heap has a soft limit and a GC setting tuned for the board's RAM.
@@ -107,7 +114,8 @@ tsshare -src <dir|zip> -mount <dir> [options]
 | `-src` | required | folder or `.zip` to share |
 | `-mount` | required | existing directory to mount on |
 | `-label` | `TSSHARE` | FAT volume label |
-| `-cache-mb` | 32 | zip: MiB of inflated entries kept in memory |
+| `-cache-mb` | 32 | zip: MiB of inflated entries kept in memory; 1 to 256, 0 means the default 32 |
+| `-max-entries` | 250000 | refuse (exit 2, nothing mounted) a source with more files and directories than this; 0 = no limit |
 | `-fd-limit` | 64 | folder: open file descriptors kept |
 | `-log` | none | file for warnings and (with `-v`) the read log; truncated at start |
 | `-v` | off | one line per read in the `-log` file (needs `-log`) |
@@ -129,8 +137,8 @@ lines, `serving share.vhd`) go to stderr; `tsshare_start.sh` redirects that to
   sectors) are used only if 4 KB would exceed the FAT32 maximum cluster count.
   Only 4 KB is known to work on the board.
 - A source needing more clusters than FAT32 allows is refused at start.
-- The disk is the partition plus a few MB of slack; free space is none to
-  speak of.
+- The disk is the partition rounded up to 1 MiB (under 1 MiB of slack); free
+  space is none to speak of.
 - Directories: at most 65536 32-byte entries each (long names use several);
   further entries in that directory are dropped with a warning.
 - Files of 4 GiB or more cannot exist on FAT32.
@@ -244,6 +252,18 @@ NOT verified on the board:
 - the scripts under BusyBox `ash`, `ps` and `umount` (only checked against
   `sh`/`dash` and `bash --posix`, no BusyBox or shellcheck on the host);
 - cluster sizes other than 4 KB and partitions other than at sector 128.
+
+## Known limits
+
+- The NT lower-case flag byte is not set, so a name like `GAME.trd` gets an
+  alias `GAME~1.TRD` and lower-case 8.3 names get long-name entries. Cosmetic:
+  it only matters to software that reads the 8.3 name alone.
+- No per-read timeout (see How it works, item 7).
+- No rescan while mounted (see above).
+- The MBR CHS fields are the standard `0xFE 0xFF 0xFF` placeholder.
+- Each file or directory costs about 550 bytes of RAM on a 32-bit board
+  (measured 552 B), so `-max-entries` defaults to 250,000. The daemon also sets
+  its `oom_score_adj` to 1000 so that the kernel kills it before Main_MiSTer.
 
 ## Troubleshooting
 

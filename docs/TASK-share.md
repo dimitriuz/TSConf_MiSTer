@@ -8,7 +8,7 @@
 Browse and fetch files from a folder or zip on the MiSTer's Linux side from a Wild Commander (WC) plugin, over the core's existing ZiFi UART, and open the result transparently. No new SD path.
 
 ## What the spike found
-Full notes were scratch files; the facts that matter:
+Full notes (with citations) are in `docs/spikes/share-A-uart-rtl.md` (core UART RTL), `share-B-zifi-midilink-wc.md` (ZiFi, MiSTer UART, WC plugin API, prior art) and `share-C-wc-plugin-launch.md` (WC plugin hand-off and next-file behaviour). They were written by research agents from public sources and are unverified secondary notes. The facts that matter:
 
 - **The core already has ZiFi.** `rtl/periph/zifi.v` implements the HackerVBI/ZX-Evo ZiFi FIFO ports (`#BFEF` data, `#C7EF` cmd/err, `#C0EF` RX used, `#C1EF` TX free; RS232 variant `#C2EF/#C3EF`). RX FIFO 8192 B, TX FIFO 256 B, polling only (no Z80 interrupts), no flow control (`UART_RTS/DTR` tied low, CTS/DSR ignored), fixed 115200 baud (`CLKS_PER_BIT = 28_000_000/115200 = 243`, `zifi.v:227,241`).
 - **UzixLS/ZiFi is a Z80 client program, not hardware.** It already downloads files over HTTP on TSConf (zxart, vtrdos, ...). Its README documents the MiSTer setup: OSD *UART Connection = Modem, Link = TCP, 115200*; ZiFi then speaks Hayes (`ATTEL0`, `ATTRANS0`, `ATQ0`, `ATDT<host>:80`) followed by raw HTTP/1.1. HTTP only, no TLS.

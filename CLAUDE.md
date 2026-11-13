@@ -2,6 +2,7 @@
 
 This is a local clone of MiSTer-devel/TSConf_MiSTer (upstream head `1f61dc5`, 2026-11-04). The work is on branch `dual-vhd`. Tasks, each started only when the owner says so:
 - **`docs/TASK-dual-vhd.md`**: a second SD image slot (do this first).
+- **`docs/TASK-share.md`**: local share/zip over the ZiFi UART or a virtual FAT on card 2 (spike done, proposal only; notes in `docs/spikes/`).
 - **`docs/TASK-neogs.md`**: NeoGS support (plan proposal; phase 3 builds on dual-VHD's slot wiring).
 
 ## How the owner works (binding)

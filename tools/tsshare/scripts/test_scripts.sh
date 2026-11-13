@@ -21,6 +21,7 @@ cleanup() {
 	fi
 	for h in $HELPERS; do kill -KILL "$h" 2>/dev/null; done
 	fusermount3 -uz "$MOUNT" 2>/dev/null
+	fusermount3 -uz "$T/vroot/share" 2>/dev/null
 	sleep 1
 	rm -rf "$T"
 }
@@ -42,6 +43,8 @@ z.writestr("dir/x.txt","x"*5000)
 z.close()' "$T/test.zip"
 fi
 
+# the older tests below exercise the single-source mode; view tests set MODE=view
+export MODE=single
 export MOUNT BIN T
 export CONF_DIR="$T/conf" LOG="$T/conf/tsshare.log" PIDFILE="$T/conf/tsshare.pid"
 export CACHE_MB=8 WAIT_SECS=20
@@ -77,6 +80,10 @@ sed -n '/BEGIN lib/,/END lib/p' "$START" > "$T/lib.start"
 sed -n '/BEGIN lib/,/END lib/p' "$STOP" > "$T/lib.stop"
 expect "lib blocks in sync" cmp -s "$T/lib.start" "$T/lib.stop"
 expect "lib block found" test -s "$T/lib.start"
+sed -n '/BEGIN defaults/,/END defaults/p' "$START" > "$T/def.start"
+sed -n '/BEGIN defaults/,/END defaults/p' "$STOP" > "$T/def.stop"
+expect "defaults blocks in sync" cmp -s "$T/def.start" "$T/def.stop"
+expect "defaults block found" test -s "$T/def.start"
 
 # mount matcher against sample /proc/mounts lines
 matcher() { # matcher MOUNT MOUNTS_FILE -> sets nothing, prints yes/no
@@ -263,6 +270,82 @@ check "start with a bad zip" 1 -- sh "$START" "$T/bad.zip"
 expect "bad zip message" has "FAILED"
 expect "pid file removed after failure" no_pidfile
 check "stop after failure" 0 -- sh "$STOP"
+
+# ---- view mode (the default): a zip root, a shared folder ----
+mkzip() { # mkzip FILE : a small zip with one 5000-byte entry
+	if command -v python3 >/dev/null 2>&1; then
+		python3 -I -c 'import sys,zipfile
+z=zipfile.ZipFile(sys.argv[1],"w",zipfile.ZIP_DEFLATED)
+z.writestr("dir/x.txt","x"*5000)
+z.close()' "$1"
+	elif command -v zip >/dev/null 2>&1; then
+		( cd "$T" && echo x > vx.txt && zip -q "$1" vx.txt )
+	else
+		return 1
+	fi
+}
+VMOUNT="$T/vroot/share"
+vmounted() { grep -q " $VMOUNT fuse" /proc/mounts; }
+not_vmounted() { ! vmounted; }
+no_zip_name() { ! ls "$VMOUNT" "$VMOUNT"/* 2>/dev/null | grep -q '\.zip'; }
+mkdir -p "$T/vroot/sub"
+if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
+	VENV="MODE=view ZIPROOT=$T/vroot SHARED=$T/vroot/shared MOUNT=$VMOUNT"
+	check "view: start (creates shared and mount)" 0 -- env $VENV sh "$START"
+	expect "view: summary" has "^View ready: pick in the OSD"
+	expect "view: OSD hint" has "Mount SD2 image -> share ->"
+	expect "view: OSD names" has "<name>.vhd or shared.vhd"
+	expect "view: created shared" has "Created folder: shared"
+	expect "view: created mount" has "Created folder: share"
+	expect "view: no line over 60 columns" test -z "$(echo "$LAST" | grep -v '^Log:' | awk 'length($0) > 60')"
+	expect "view: mounted" vmounted
+	expect "view: pid file written" test -s "$PIDFILE"
+	expect "view: shared.vhd" test -e "$VMOUNT/shared.vhd"
+	expect "view: game.vhd" test -s "$VMOUNT/game.vhd"
+	expect "view: sub/inner.vhd" test -s "$VMOUNT/sub/inner.vhd"
+	expect "view: no entry contains .zip" no_zip_name
+	expect "view: mount point itself hidden" test ! -e "$VMOUNT/share"
+	check "view: second start refuses" 1 -- env $VENV sh "$START"
+	expect "view: refusal message" has "already running"
+	expect "view: still mounted after refusal" vmounted
+	check "view: stop" 0 -- env $VENV sh "$STOP"
+	expect "view: unmounted" not_vmounted
+	expect "view: pid file removed" no_pidfile
+	# existing folders are not announced; a file in shared is served
+	echo hi > "$T/vroot/shared/note.txt"
+	check "view: restart" 0 -- env $VENV sh "$START"
+	expect "view: nothing created the second time" test -z "$(echo "$LAST" | grep Created)"
+	expect "view: shared.vhd after restart" test -e "$VMOUNT/shared.vhd"
+	check "view: stop (restart)" 0 -- env $VENV sh "$STOP"
+	expect "view: unmounted (restart)" not_vmounted
+	check "view: stop with nothing running" 0 -- env $VENV sh "$STOP"
+	# argument = zip root
+	check "view: zip root as argument" 0 -- env MODE=view SHARED="$T/vroot/shared" MOUNT="$VMOUNT" sh "$START" "$T/vroot"
+	check "view: stop (argument)" 0 -- env $VENV sh "$STOP"
+	# a mount inside the shared folder is refused, nothing left behind
+	check "view: MOUNT inside SHARED refused" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vroot/shared" MOUNT="$T/vroot/shared/m" sh "$START"
+	expect "view: inside-SHARED message" has "inside SHARED"
+	expect "view: inside-SHARED leaves no pid file" no_pidfile
+	# the daemon refuses a symlinked way in: its message reaches the log tail
+	ln -s "$T/vroot/shared" "$T/vlink"
+	check "view: MOUNT inside SHARED via symlink (daemon check)" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vlink" MOUNT="$T/vroot/shared/m2" sh "$START"
+	expect "view: daemon check leaves no pid file" no_pidfile
+	rm -rf "$T/vroot/shared/m" "$T/vroot/shared/m2"
+else
+	echo "skip: view tests (no python3 or zip)"
+fi
+check "view: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/nozip" SHARED="$T/nozip/shared" MOUNT="$T/nozip/share" sh "$START"
+expect "view: missing ZIPROOT message" has "folder not found"
+expect "view: missing ZIPROOT created nothing" test ! -e "$T/nozip"
+expect "view: missing ZIPROOT: no pid file" no_pidfile
+check "bad MODE" 1 -- env MODE=bogus sh "$START"
+expect "bad MODE message" has "MODE must be"
+check "bad MODE (stop)" 1 -- env MODE=bogus sh "$STOP"
+# MODE=single is unchanged (the tests above all run in it)
+check "MODE=single start" 0 -- env MODE=single sh "$START" "$T/src"
+expect "MODE=single share.vhd" test -s "$MOUNT/share.vhd"
+check "MODE=single stop" 0 -- env MODE=single sh "$STOP"
+expect "MODE=single unmounted" not_mounted
 
 echo
 if [ "$FAILS" = 0 ]; then echo "ALL PASSED"; exit 0; fi

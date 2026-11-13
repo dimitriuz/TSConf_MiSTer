@@ -1,14 +1,16 @@
 #!/bin/sh
 # tsshare_stop.sh - stop the tsshare daemon (MiSTer Scripts menu).
 # Touches only $MOUNT (unmounts, keeps the directory) and the pid file.
+# MODE must match the start (view is the default).
 
 # ---- settings (override with environment variables) ----
-MOUNT="${MOUNT:-/media/fat/tsshare}"
+MODE="${MODE:-view}"
 CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 # ---- test hooks (used by test_scripts.sh; leave alone on the board) ----
 PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-10}"
 # MOUNTS_FILE: see the lib below
+# MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare.
 # MOUNT: use the real path (symlinked parents are not resolved).
 # --------------------------------------------------------
 
@@ -88,6 +90,23 @@ scan_pid() {
 	return 1
 }
 # ---- END lib ----
+
+# ---- BEGIN defaults (identical in start and stop; test_scripts.sh diffs it) ----
+case "$MODE" in
+view | single) ;;
+*)
+	echo "ERROR: MODE must be view or single"
+	exit 1
+	;;
+esac
+if [ -z "$MOUNT" ]; then
+	if [ "$MODE" = view ]; then
+		MOUNT=/media/fat/games/TSConf/share
+	else
+		MOUNT=/media/fat/tsshare
+	fi
+fi
+# ---- END defaults ----
 
 # normalise MOUNT: no trailing slashes; refuse "" and "/". A symlinked
 # parent directory is not resolved (/proc/mounts shows the real path):

@@ -1,14 +1,20 @@
 #!/bin/sh
 # tsshare_start.sh - start the tsshare daemon (MiSTer Scripts menu).
 #
-# Serves a folder or a zip as a read-only FAT32 disk, share.vhd, in
-# $MOUNT. Then, in the TSConf OSD: Mount SD2 image -> tsshare -> share.vhd.
-# Usage: tsshare_start.sh [folder-or-zip]
-# Touches only $MOUNT (creates it) and the files in $CONF_DIR.
+# MODE=view (default): $MOUNT shows every zip under $ZIPROOT as
+# <name>.vhd, plus shared.vhd (the folder $SHARED), read-only FAT32 disks.
+# Then, in the TSConf OSD: Mount SD2 image -> share -> <name>.vhd.
+# MODE=single: one folder or zip as share.vhd in $MOUNT.
+# Usage: tsshare_start.sh [zip-root-folder]    (single: [folder-or-zip])
+# Touches only $MOUNT and $SHARED (view mode creates them) and the
+# files in $CONF_DIR.
 
 # ---- settings (edit here, or override with environment variables) ----
+MODE="${MODE:-view}"
+ZIPROOT="${ZIPROOT:-/media/fat/games/TSConf}"
+SHARED="${SHARED:-/media/fat/games/TSConf/shared}"
 SRC="${SRC:-/media/fat/games/Spectrum/compilations/AAA/SD.zip}"
-MOUNT="${MOUNT:-/media/fat/tsshare}"
+# MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare
 CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 BIN="${BIN:-$CONF_DIR/tsshare}"
 CACHE_MB="${CACHE_MB:-32}"
@@ -21,6 +27,23 @@ WAIT_SECS="${WAIT_SECS:-90}"
 # BIN must be named exactly "tsshare": the scripts recognise the daemon
 # by that name. MOUNT: use the real path (symlinked parents are not resolved).
 # -----------------------------------------------------------------------
+
+# ---- BEGIN defaults (identical in start and stop; test_scripts.sh diffs it) ----
+case "$MODE" in
+view | single) ;;
+*)
+	echo "ERROR: MODE must be view or single"
+	exit 1
+	;;
+esac
+if [ -z "$MOUNT" ]; then
+	if [ "$MODE" = view ]; then
+		MOUNT=/media/fat/games/TSConf/share
+	else
+		MOUNT=/media/fat/tsshare
+	fi
+fi
+# ---- END defaults ----
 
 # normalise MOUNT: no trailing slashes; refuse "" and "/". A symlinked
 # parent directory is not resolved (/proc/mounts shows the real path):
@@ -35,7 +58,9 @@ case "$MOUNT" in
 	;;
 esac
 
-[ -n "$1" ] && SRC="$1"
+if [ -n "$1" ]; then
+	if [ "$MODE" = view ]; then ZIPROOT="$1"; else SRC="$1"; fi
+fi
 
 die() {
 	echo "ERROR: $1"
@@ -120,6 +145,13 @@ scan_pid() {
 }
 # ---- END lib ----
 
+# serving: in view mode also require our own mount, not just the file
+ready() {
+	[ -e "$MOUNT/$READY" ] || return 1
+	[ "$MODE" = view ] && { is_mounted || return 1; }
+	return 0
+}
+
 show_log() {
 	[ -f "$LOG" ] && tail -n 4 "$LOG" | cut -c1-60
 }
@@ -127,7 +159,18 @@ show_log() {
 [ "${BIN##*/}" = tsshare ] || die "BIN must be named tsshare:" "$BIN"
 [ -f "$BIN" ] || die "no daemon at" "$BIN"
 [ -x "$BIN" ] || die "not executable (chmod +x):" "$BIN"
-[ -e "$SRC" ] || die "source not found:" "$SRC"
+if [ "$MODE" = view ]; then
+	[ -d "$ZIPROOT" ] || die "folder not found:" "$ZIPROOT"
+	# textual check only; the daemon resolves paths and has the last word
+	case "$MOUNT/" in
+	"$SHARED"/*) die "MOUNT must not be inside SHARED:" "$MOUNT" ;;
+	esac
+else
+	[ -e "$SRC" ] || die "source not found:" "$SRC"
+fi
+
+# the file that shows the daemon is serving
+if [ "$MODE" = view ]; then READY=shared.vhd; else READY=share.vhd; fi
 
 # one instance only
 if [ -f "$PIDFILE" ]; then
@@ -163,15 +206,30 @@ if [ -d /sys/fs/fuse/connections ] && \
 	mount -t fusectl none /sys/fs/fuse/connections 2>/dev/null
 fi
 
+if [ "$MODE" = view ] && [ ! -d "$SHARED" ]; then
+	mkdir -p "$SHARED" || die "cannot create" "$SHARED"
+	echo "Created folder: ${SHARED##*/}" | cut -c1-60
+fi
+if [ "$MODE" = view ] && [ ! -d "$MOUNT" ]; then
+	mkdir -p "$MOUNT" || die "cannot create" "$MOUNT"
+	echo "Created folder: ${MOUNT##*/}" | cut -c1-60
+fi
 mkdir -p "$MOUNT" || die "cannot create" "$MOUNT"
 mkdir -p "$CONF_DIR" || die "cannot create" "$CONF_DIR"
 # without a log file the daemon would never start: say why (read-only or full SD card?)
 ( : > "$LOG" ) 2>/dev/null || die "cannot create the log file (read-only or full SD card?)" "$LOG"
 
-echo "Sharing: ${SRC##*/}" | cut -c1-60
-echo "Scanning (up to ${WAIT_SECS}s)..."
-setsid nohup "$BIN" -src "$SRC" -mount "$MOUNT" -cache-mb "$CACHE_MB" \
-	-label "$LABEL" > "$LOG" 2>&1 < /dev/null &
+if [ "$MODE" = view ]; then
+	echo "Viewing: ${ZIPROOT##*/}" | cut -c1-60
+	echo "Starting (up to ${WAIT_SECS}s)..."
+	setsid nohup "$BIN" -view "$ZIPROOT" -shared "$SHARED" -mount "$MOUNT" \
+		-cache-mb "$CACHE_MB" -label "$LABEL" > "$LOG" 2>&1 < /dev/null &
+else
+	echo "Sharing: ${SRC##*/}" | cut -c1-60
+	echo "Scanning (up to ${WAIT_SECS}s)..."
+	setsid nohup "$BIN" -src "$SRC" -mount "$MOUNT" -cache-mb "$CACHE_MB" \
+		-label "$LABEL" > "$LOG" 2>&1 < /dev/null &
+fi
 PID=$!
 echo "$PID" > "$PIDFILE"
 
@@ -179,7 +237,7 @@ echo "$PID" > "$PIDFILE"
 trap 'echo; echo "Interrupted. The daemon may still be"; echo "starting: run tsshare_stop.sh."; exit 130' INT TERM
 
 i=0
-while [ ! -e "$MOUNT/share.vhd" ]; do
+while ! ready; do
 	if ! alive "$PID"; then
 		# setsid may have forked: look for the real daemon
 		REAL="$(scan_pid)"
@@ -194,7 +252,7 @@ while [ ! -e "$MOUNT/share.vhd" ]; do
 		fi
 	fi
 	if [ "$i" -ge "$WAIT_SECS" ]; then
-		echo "FAILED: no share.vhd after ${WAIT_SECS}s."
+		echo "FAILED: no $READY after ${WAIT_SECS}s."
 		show_log
 		echo "Run tsshare_stop.sh to clean up."
 		exit 1
@@ -204,6 +262,13 @@ while [ ! -e "$MOUNT/share.vhd" ]; do
 done
 trap - INT TERM
 
+if [ "$MODE" = view ]; then
+	echo "View ready: pick in the OSD (${i}s, pid $PID)"
+	echo "Mount SD2 image -> ${MOUNT##*/} ->" | cut -c1-60
+	echo "  <name>.vhd or shared.vhd"
+	echo "Log: $LOG"
+	exit 0
+fi
 echo "OK, ready after ${i}s (pid $PID)"
 grep '^tree:' "$LOG" | sed 's/^tree: //; s/ (including.*//' | cut -c1-60
 grep '^volume:' "$LOG" | sed 's/^volume: //; s/, partition.*//' | cut -c1-60

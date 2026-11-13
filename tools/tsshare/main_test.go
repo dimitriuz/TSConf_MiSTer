@@ -285,6 +285,10 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
+// TestShutdownBusy: a process with its cwd inside the mount makes the clean
+// unmount fail. The daemon then lazily unmounts (the mount leaves
+// /proc/self/mountinfo) but keeps serving until the last user leaves; a second
+// signal ends it with status exactly 1.
 func TestShutdownBusy(t *testing.T) {
 	d := startDaemon(t, makeTree(t))
 	sh := exec.Command("sh", "-c", "cd \"$1\" && exec sleep 60", "sh", d.mnt)
@@ -292,27 +296,113 @@ func TestShutdownBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { sh.Process.Kill(); sh.Wait() }()
-	time.Sleep(300 * time.Millisecond)
-	d.cmd.Process.Signal(syscall.SIGTERM)
-	// busy path: the daemon either lazily unmounted and exited, or is waiting
-	select {
-	case <-d.done:
-	case <-time.After(1500 * time.Millisecond):
-		d.cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case err := <-d.done:
-			if c := exitCode(err); c != 0 && c != 1 {
-				t.Fatalf("exit code %d\n%s", c, d.stderr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("second signal did not end the daemon\n%s", d.stderr)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cwd, _ := os.Readlink(fmt.Sprintf("/proc/%d/cwd", sh.Process.Pid))
+		if cwd == d.mnt {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shell never entered the mount (cwd %q)", cwd)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	d.cmd.Process.Signal(syscall.SIGTERM)
+	deadline = time.Now().Add(5 * time.Second)
+	for isMounted(d.mnt) {
+		if time.Now().After(deadline) {
+			t.Fatalf("mount not detached after first signal\n%s", d.stderr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case err := <-d.done:
+		t.Fatalf("daemon exited on the first signal while busy: %v\n%s", err, d.stderr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	d.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case err := <-d.done:
+		if c := exitCode(err); c != 1 {
+			t.Fatalf("exit code %d, want 1\n%s", c, d.stderr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("second signal did not end the daemon\n%s", d.stderr)
 	}
 	if !strings.Contains(d.stderr.String(), "lazy unmount") {
 		t.Errorf("no lazy unmount in output:\n%s", d.stderr)
 	}
-	if isMounted(d.mnt) {
-		t.Fatal("still mounted")
+}
+
+func TestSignalDuringBuild(t *testing.T) {
+	needFuse(t)
+	for sigName, tc := range map[string]struct {
+		sig  syscall.Signal
+		want int
+	}{"term": {syscall.SIGTERM, 143}, "int": {syscall.SIGINT, 130}} {
+		t.Run(sigName, func(t *testing.T) {
+			mnt := filepath.Join(t.TempDir(), "mnt")
+			os.Mkdir(mnt, 0o755)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, daemonBin, "-src", makeTree(t), "-mount", mnt)
+			cmd.Env = append(os.Environ(), "TSSHARE_TEST_BUILD_DELAY=20s")
+			var se bytes.Buffer
+			cmd.Stderr = &se
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(500 * time.Millisecond) // inside the build delay
+			start := time.Now()
+			cmd.Process.Signal(tc.sig)
+			err := cmd.Wait()
+			if c := exitCode(err); c != tc.want {
+				t.Fatalf("exit %d, want %d\n%s", c, tc.want, se.String())
+			}
+			if time.Since(start) > 3*time.Second {
+				t.Errorf("took %v to cancel", time.Since(start))
+			}
+			if isMounted(mnt) {
+				t.Fatal("mounted")
+			}
+			if _, err := os.Stat(filepath.Join(mnt, "share.vhd")); err == nil {
+				t.Fatal("share.vhd present")
+			}
+			if strings.Contains(se.String(), "serving") {
+				t.Errorf("reached serving:\n%s", se.String())
+			}
+		})
+	}
+}
+
+func TestUsageErrors(t *testing.T) {
+	needFuse(t)
+	src := makeTree(t)
+	file := filepath.Join(t.TempDir(), "regular")
+	os.WriteFile(file, nil, 0o644)
+	for name, args := range map[string][]string{
+		"mount-file":    {"-src", src, "-mount", file},
+		"mount-missing": {"-src", src, "-mount", filepath.Join(t.TempDir(), "nope")},
+		"v-without-log": {"-src", src, "-mount", t.TempDir(), "-v"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, daemonBin, args...)
+			var se bytes.Buffer
+			cmd.Stderr = &se
+			if c := exitCode(cmd.Run()); c != 2 {
+				t.Fatalf("exit %d, want 2\n%s", c, se.String())
+			}
+			if !strings.Contains(se.String(), "tsshare:") {
+				t.Errorf("unclear message %q", se.String())
+			}
+			for _, a := range args {
+				if isMounted(a) {
+					t.Fatalf("%s mounted", a)
+				}
+			}
+		})
 	}
 }
 

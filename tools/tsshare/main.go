@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -112,6 +114,91 @@ func fatal(format string, a ...any) {
 	os.Exit(2)
 }
 
+// shutdown coordinates signals with startup. The first signal records an exit
+// status and closes cancelled; before the mount exists, main checks it between
+// stages and exits without mounting. After the mount, the first signal unmounts
+// (lazily if busy) and a second one forces a lazy unmount and exit 1.
+type shutdown struct {
+	mu        sync.Mutex
+	code      int // 0 until the first signal; 130 SIGINT, 143 SIGTERM
+	cancelled chan struct{}
+	srv       *fuse.Server
+	mnt       string
+	cleanup   func() // closes log and source; set before the first stage that needs it
+}
+
+func (sd *shutdown) isCancelled() bool {
+	select {
+	case <-sd.cancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func (sd *shutdown) run(sig <-chan os.Signal) {
+	s := <-sig
+	log.Printf("got %v", s)
+	sd.mu.Lock()
+	sd.code = 143
+	if s == syscall.SIGINT {
+		sd.code = 130
+	}
+	close(sd.cancelled)
+	srv := sd.srv
+	sd.mu.Unlock()
+	if srv != nil {
+		go sd.unmount(srv)
+	}
+	s = <-sig
+	log.Printf("got %v again, exiting", s)
+	sd.mu.Lock()
+	srv = sd.srv
+	sd.mu.Unlock()
+	if srv != nil {
+		if err := lazyUnmount(sd.mnt); err != nil {
+			log.Printf("lazy unmount: %v", err)
+		}
+	}
+	if sd.cleanup != nil {
+		sd.cleanup()
+	}
+	os.Exit(1)
+}
+
+func (sd *shutdown) unmount(srv *fuse.Server) {
+	if err := srv.Unmount(); err != nil {
+		log.Printf("unmount: %v; trying lazy unmount", err)
+		if err := lazyUnmount(sd.mnt); err != nil {
+			log.Printf("lazy unmount: %v", err)
+		}
+	}
+}
+
+// setServer publishes the mounted server; if a signal arrived during Mount it
+// starts the unmount at once.
+func (sd *shutdown) setServer(srv *fuse.Server) {
+	sd.mu.Lock()
+	sd.srv = srv
+	c := sd.isCancelled()
+	sd.mu.Unlock()
+	if c {
+		go sd.unmount(srv)
+	}
+}
+
+// abortIfCancelled exits with the signal's status, without mounting, once a
+// signal has arrived.
+func (sd *shutdown) abortIfCancelled() {
+	if sd.isCancelled() {
+		log.Printf("cancelled before mounting")
+		if sd.cleanup != nil {
+			sd.cleanup()
+		}
+		os.Exit(sd.code)
+	}
+}
+
 func main() {
 	src := flag.String("src", "", "directory or zip file to share (required)")
 	mnt := flag.String("mount", "", "mount point directory (required)")
@@ -126,30 +213,54 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	if *verbose && *logPath == "" {
+		fatal("-v needs -log <file>")
+	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("tsshare: ")
 	if *memMB > 0 {
 		debug.SetMemoryLimit(int64(*memMB) << 20)
 	}
 
-	// Install the handler before anything slow; the buffered channel queues a
-	// signal that arrives while the tree is being scanned or Mount runs.
+	// Signals are handled from the very start, so a long scan can be cancelled.
+	sd := &shutdown{cancelled: make(chan struct{}), mnt: *mnt}
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go sd.run(sig)
+
+	if st, err := os.Stat(*mnt); err != nil || !st.IsDir() {
+		if err == nil {
+			err = errors.New("not a directory")
+		}
+		fatal("bad -mount %s: %v", *mnt, err)
+	}
 
 	var rl *readLog
 	var lf *os.File
+	var vol *Volume
+	var s Source
+	sd.cleanup = func() {
+		rl.close()
+		if vol != nil {
+			vol.Close()
+		} else if s != nil {
+			s.Close()
+		}
+		if lf != nil {
+			lf.Close()
+		}
+	}
 	if *logPath != "" {
 		var err error
 		lf, err = os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
 			fatal("%v", err)
 		}
-		defer lf.Close()
 	}
 
 	t0 := time.Now()
-	s, err := OpenSource(*src, SourceOptions{CacheMB: *cacheMB, FDLimit: *fdLimit})
+	var err error
+	s, err = OpenSource(*src, SourceOptions{CacheMB: *cacheMB, FDLimit: *fdLimit})
 	if err != nil {
 		fatal("cannot open source: %v", err)
 	}
@@ -158,12 +269,20 @@ func main() {
 		kind = "zip file"
 	}
 	fmt.Fprintf(os.Stderr, "source: %s %s\n", kind, *src)
+	sd.abortIfCancelled()
 	vol, warns, err := NewVolume(s, VolumeOptions{Label: *label})
 	if err != nil {
 		s.Close()
 		fatal("cannot build a FAT32 volume from %s: %v", *src, err)
 	}
-	defer vol.Close()
+	// Test hook: stretch the build so tests can signal during it.
+	if d, err := time.ParseDuration(os.Getenv("TSSHARE_TEST_BUILD_DELAY")); err == nil {
+		select {
+		case <-time.After(d):
+		case <-sd.cancelled:
+		}
+	}
+	sd.abortIfCancelled()
 	built := time.Since(t0)
 	g := vol.Geometry()
 	fmt.Fprintf(os.Stderr, "tree: %d files, %d directories (including the root)\n", g.Files, g.Dirs)
@@ -188,41 +307,46 @@ func main() {
 	}
 
 	v := &vhdFile{vol: vol, size: vol.Size(), partStart: g.PartStart * sectorSize, log: rl}
-	// DirectMount calls mount(2) as root and falls back to fusermount3 otherwise.
-	srv, err := fs.Mount(*mnt, &root{vhd: v}, &fs.Options{
-		MountOptions: fuse.MountOptions{
-			DirectMount: true,
-			Name:        "tsshare",
-			FsName:      "tsshare",
-		},
-	})
+	srv, err := mountFS(*mnt, &root{vhd: v})
 	if err != nil {
-		rl.close()
 		log.Printf("mount: %v", err)
+		sd.cleanup()
 		os.Exit(1)
 	}
-	go func() {
-		s := <-sig
-		log.Printf("got %v, unmounting", s)
-		if err := srv.Unmount(); err != nil {
-			log.Printf("unmount: %v; trying lazy unmount", err)
-			if err := lazyUnmount(*mnt); err != nil {
-				log.Printf("lazy unmount: %v", err)
-			}
-		}
-		s = <-sig
-		log.Printf("got %v again, lazy unmount and exit", s)
-		if err := lazyUnmount(*mnt); err != nil {
-			log.Printf("lazy unmount: %v", err)
-		}
-		rl.close()
-		vol.Close()
-		os.Exit(1)
-	}()
+	sd.setServer(srv)
 	fmt.Fprintf(os.Stderr, "serving share.vhd (%d bytes) at %s\n", vol.Size(), *mnt)
 	srv.Wait()
-	rl.close()
+	sd.cleanup()
 	log.Printf("exiting")
+}
+
+// mountFS mounts r. As root it uses go-fuse's strict direct mount(2), so a
+// missing /dev/fuse or unsupported kernel gives the real error rather than
+// "fusermount3 not found" (the board has no fusermount). Strict has one
+// downside: it never falls back, so if mount(2) is refused for a reason that
+// fusermount3 would handle, we retry with fusermount3 and report both errors
+// if that fails too. Non-root users go through fusermount3 directly.
+func mountFS(mnt string, r fs.InodeEmbedder) (*fuse.Server, error) {
+	opts := func(strict bool) *fs.Options {
+		return &fs.Options{MountOptions: fuse.MountOptions{
+			DirectMountStrict: strict,
+			Name:              "tsshare",
+			FsName:            "tsshare",
+		}}
+	}
+	if os.Geteuid() != 0 {
+		return fs.Mount(mnt, r, opts(false))
+	}
+	srv, err := fs.Mount(mnt, r, opts(true))
+	if err == nil {
+		return srv, nil
+	}
+	srv, err2 := fs.Mount(mnt, r, opts(false))
+	if err2 != nil {
+		return nil, fmt.Errorf("direct mount: %v; fusermount fallback: %v", err, err2)
+	}
+	log.Printf("direct mount failed (%v); mounted through fusermount", err)
+	return srv, nil
 }
 
 func lazyUnmount(mnt string) error {

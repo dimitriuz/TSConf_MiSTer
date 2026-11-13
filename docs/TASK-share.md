@@ -2,13 +2,15 @@
 
 **Status: spike done (2026-11-13), proposal only. Do not start on your own.**
 
+**Update after spike D (owner prefers NOT to alter Main_MiSTer):** the Minimig and ao486 shares are *not* virtual disks. Each is a filesystem RPC served by Main_MiSTer (`support/minimig/minimig_share.cpp`, ~930 lines; `support/x86/x86_share.cpp`, ~1200 lines) over a DDR mailbox (ARM mmaps `/dev/mem`: 8 KB at `0x27FF4000` for Minimig, `0x300CE000` for x86; the ARM polls a request word with a magic number and echoes an ack), with a guest-side driver on the Amiga/DOS side. The core-specific part in Main_MiSTer is tiny (an `is_minimig()` gate and a poll call). There is no generic mechanism for a core to trigger ARM code: UIO opcodes are ARM-initiated, `/dev/MiSTer_cmd` accepts only `fb_cmd`, `video_mode`, `load_core`, `screenshot`, `volume`, and `user_io_file_mount` mounts exactly one regular file (no folder, no zip). So a clean "folder as drive" needs a new `tsconf_share.cpp` in Main_MiSTer; without editing Main the realistic design is the same RPC-over-DDR-mailbox idea with a separate ARM daemon (option B below) or the UART daemon (option A).
+
 **Verdict after the WC source check (spike C):** a ZiFi plugin cannot make a share behave like a local folder for third-party player plugins. Use it to *sync* a folder into a cache directory on card 1, then browse and play normally. For a share that acts as a real drive (open folder, play, auto-next), the virtual FAT volume on card 2 (Main_MiSTer change) is the only route that works without per-track gaps or user keypresses.
 
 ## Goal
 Browse and fetch files from a folder or zip on the MiSTer's Linux side from a Wild Commander (WC) plugin, over the core's existing ZiFi UART, and open the result transparently. No new SD path.
 
 ## What the spike found
-Full notes (with citations) are in `docs/spikes/share-A-uart-rtl.md` (core UART RTL), `share-B-zifi-midilink-wc.md` (ZiFi, MiSTer UART, WC plugin API, prior art) and `share-C-wc-plugin-launch.md` (WC plugin hand-off and next-file behaviour). They were written by research agents from public sources and are unverified secondary notes. The facts that matter:
+Full notes (with citations) are in `docs/spikes/share-A-uart-rtl.md` (core UART RTL), `share-B-zifi-midilink-wc.md` (ZiFi, MiSTer UART, WC plugin API, prior art) and `share-C-wc-plugin-launch.md` (WC plugin hand-off and next-file behaviour) and `share-D-main-mister-shares.md` (how Main_MiSTer serves the Minimig/ao486 shares, and options without editing it). They were written by research agents from public sources and are unverified secondary notes. The facts that matter:
 
 - **The core already has ZiFi.** `rtl/periph/zifi.v` implements the HackerVBI/ZX-Evo ZiFi FIFO ports (`#BFEF` data, `#C7EF` cmd/err, `#C0EF` RX used, `#C1EF` TX free; RS232 variant `#C2EF/#C3EF`). RX FIFO 8192 B, TX FIFO 256 B, polling only (no Z80 interrupts), no flow control (`UART_RTS/DTR` tied low, CTS/DSR ignored), fixed 115200 baud (`CLKS_PER_BIT = 28_000_000/115200 = 243`, `zifi.v:227,241`).
 - **UzixLS/ZiFi is a Z80 client program, not hardware.** It already downloads files over HTTP on TSConf (zxart, vtrdos, ...). Its README documents the MiSTer setup: OSD *UART Connection = Modem, Link = TCP, 115200*; ZiFi then speaks Hayes (`ATTEL0`, `ATTRANS0`, `ATQ0`, `ATDT<host>:80`) followed by raw HTTP/1.1. HTTP only, no TLS.
@@ -28,6 +30,13 @@ Full notes (with citations) are in `docs/spikes/share-A-uart-rtl.md` (core UART 
 1b. **Alternative to stage 1: virtual FAT on card 2.** Main_MiSTer presents the share as a read-only FAT volume in the second VHD slot built by the dual-VHD work. WC sees a normal drive, so folders, players and auto-next work with no sync and no Z80 code. Cost: a C++ change in Main_MiSTer (virtual FAT builder, lazy file reads, a way to pick a folder for the slot); the folder must not change while mounted. Choose 1 or 1b by whether the sync wait is acceptable.
 2. **Speed.** Make `CLKS_PER_BIT` selectable (1 Mbaud = 28 clocks, 2 Mbaud = 14, both exact; 921600 is 1.3 % off). Fix the two ZiFi bugs above without breaking `zifi.spg`. Replace MidiLink's Modem mode with a small purpose-built daemon on `/dev/ttyS1` (MidiLink's list caps at 115200, and no flow control means the daemon must pace itself). Estimate: 115200 gives about 11 KB/s, so a 640 KB `.trd` takes about a minute; 1 Mbaud is about 10x faster if the Z80 poll loop keeps up.
 3. **Optional:** upload (write back to the share), directory navigation, cache.
+
+## Options that do not edit Main_MiSTer (spike D, ranked by effort)
+- **A. UART daemon**: a process on `/dev/ttyS1` answering as modem/ESP. About 300-600 lines plus the Z80 client. Slow (about 11 KB/s at 115200). Needs starting (see below).
+- **B. DDR mailbox**: copy the Minimig/x86 transport. The core gets a small DDR master and Z80 ports; a daemon mmaps `/dev/mem` at a free physical range and serves a catalog plus file data. Fast (about 0.5 MB/s on the Z80 side), no AT/HTTP layer. Needs RTL work, the plugin (a WC plugin is the "driver"), and a free DDR range (unconfirmed which).
+- **C. Image builder**: a script that builds a FAT/TRD image from a folder and mounts it in the second VHD slot. Cheapest and works with every player and auto-next, but it is a snapshot (remount from the OSD after changes).
+- **Starting an ARM process without editing Main or `user-startup.sh`:** the MiSTer Scripts menu (my knowledge, unverified in the spike) can launch a script by hand; the `uartmode` hook runs on every UART mode change but lives on the Linux image and is shared with other cores. Unconfirmed: what `uartmode` does exactly, and whether the UART bridge must be stopped first.
+- **Clean fix for later:** a TSConf module in Main_MiSTer, about 250-400 lines for a read-only version, by analogy with the two existing modules. Not wanted by the owner for now.
 
 ## Open questions for the owner
 - Is HTTP over loopback acceptable as the protocol (yes for stage 0), or do you want a custom binary protocol for the plugin?

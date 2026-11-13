@@ -12,15 +12,20 @@ command -v fusermount3 >/dev/null 2>&1 || { echo "SKIP: no fusermount3"; exit 0;
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/tsshare-scripts.XXXXXX")" || exit 1
 MOUNT="$T/mnt"
+HELPERS=""
 cleanup() {
+	trap '' INT TERM
+	# the daemon, by the pid file the scripts use
+	if [ -f "$T/conf/tsshare.pid" ]; then
+		kill -KILL "$(cat "$T/conf/tsshare.pid")" 2>/dev/null
+	fi
+	for h in $HELPERS; do kill -KILL "$h" 2>/dev/null; done
 	fusermount3 -uz "$MOUNT" 2>/dev/null
-	for f in "$T"/pid* ; do
-		[ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null
-	done
 	sleep 1
 	rm -rf "$T"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 if [ -z "$BIN" ]; then
 	BIN="$T/tsshare"
@@ -65,6 +70,82 @@ mounted() { grep -q " $MOUNT fuse" /proc/mounts; }
 not_mounted() { ! mounted; }
 no_pidfile() { [ ! -e "$PIDFILE" ]; }
 has() { echo "$LAST" | grep -q "$1"; }
+
+# lib blocks must be identical in both scripts
+sed -n '/BEGIN lib/,/END lib/p' "$START" > "$T/lib.start"
+sed -n '/BEGIN lib/,/END lib/p' "$STOP" > "$T/lib.stop"
+expect "lib blocks in sync" cmp -s "$T/lib.start" "$T/lib.stop"
+expect "lib block found" test -s "$T/lib.start"
+
+# mount matcher against sample /proc/mounts lines
+matcher() { # matcher MOUNT MOUNTS_FILE -> sets nothing, prints yes/no
+	(MOUNT="$1" MOUNTS_FILE="$2"; . "$T/lib.start"; is_mounted && echo yes || echo no)
+}
+cat > "$T/m1" <<'M'
+sshfs#u@h:/x /media/fat/tsshare fuse.sshfs rw 0 0
+M
+cat > "$T/m2" <<'M'
+tsshare /media/fat/tsshare2 fuse.tsshare rw 0 0
+M
+cat > "$T/m3" <<'M'
+tsshare /media/fat/tsshare fuse.tsshare rw 0 0
+M
+cat > "$T/m4" <<'M'
+tsshare /a\040b/ts fuse.tsshare rw 0 0
+M
+cat > "$T/m5" <<'M'
+tsshare /media/fat/tsshare fuse.tsshare rw 0 0
+sshfs#u@h:/x /media/fat/tsshare fuse.sshfs rw 0 0
+M
+cat > "$T/m6" <<'M'
+tsshare /media/fat/tsshare fuse rw 0 0
+M
+expect "foreign fuse.sshfs not ours" test "$(matcher /media/fat/tsshare "$T/m1")" = no
+expect "prefix path (tsshare2) not matched" test "$(matcher /media/fat/tsshare "$T/m2")" = no
+expect "fuse.tsshare matched" test "$(matcher /media/fat/tsshare "$T/m3")" = yes
+expect "octal-escaped space matched" test "$(matcher "/a b/ts" "$T/m4")" = yes
+expect "escaped path, wrong dir" test "$(matcher "/a/b/ts" "$T/m4")" = no
+expect "foreign mount stacked on top" test "$(matcher /media/fat/tsshare "$T/m5")" = no
+expect "plain fstype fuse not ours" test "$(matcher /media/fat/tsshare "$T/m6")" = no
+# foreign mount at MOUNT: start refuses, stop leaves it alone
+sed "s|/media/fat/tsshare|$MOUNT|" "$T/m1" > "$T/mf"
+check "start over a foreign mount" 1 -- env MOUNTS_FILE="$T/mf" sh "$START" "$T/src"
+expect "foreign mount message" has "another filesystem"
+check "stop with a foreign mount" 0 -- env MOUNTS_FILE="$T/mf" sh "$STOP"
+expect "foreign mount left alone" has "not running"
+
+# unrelated live process in the pid file must survive
+sleep 100 &
+UNREL=$!
+HELPERS="$HELPERS $UNREL"
+echo "$UNREL" > "$PIDFILE"
+check "stop with pid file of an unrelated process" 0 -- sh "$STOP"
+expect "stale reported" has "stale"
+expect "unrelated process still alive" kill -0 "$UNREL"
+expect "pid file removed (unrelated)" no_pidfile
+# a process whose argv[0] is tsshare but without -mount
+mkdir -p "$T/fake"
+ln -s "$(command -v sleep)" "$T/fake/tsshare"
+"$T/fake/tsshare" 100 &
+FAKE=$!
+HELPERS="$HELPERS $FAKE"
+grep -q tsshare "/proc/$FAKE/cmdline" || echo "note: fake cmdline lacks tsshare"
+echo "$FAKE" > "$PIDFILE"
+check "stop with a tsshare-named process without -mount" 0 -- sh "$STOP"
+expect "stale reported (fake)" has "stale"
+expect "fake process still alive" kill -0 "$FAKE"
+echo "$FAKE" > "$PIDFILE"
+check "start with that pid file" 0 -- sh "$START" "$T/src"
+expect "start called it stale" has "stale"
+check "stop after fake" 0 -- sh "$STOP"
+expect "fake survived again" kill -0 "$FAKE"
+kill -KILL "$UNREL" "$FAKE" 2>/dev/null
+
+# output width: no line longer than 60 columns (paths of the temp dir excluded)
+check "width probe" 0 -- sh "$START" "$T/src"
+LONG="$(echo "$LAST" | grep -v "^Log:" | awk 'length($0) > 60')"
+expect "no output line over 60 columns" test -z "$LONG"
+sh "$STOP" > /dev/null 2>&1
 
 check "stop with nothing running" 0 -- sh "$STOP"
 check "bad SRC" 1 -- sh "$START" "$T/nonexistent"

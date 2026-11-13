@@ -40,6 +40,22 @@ see "Verified and not verified".
 4. When done: eject the image in the OSD (or reset the core), then run
    `tsshare_stop.sh`.
 
+The default mount point lives on the SD card (`/media/fat/tsshare`). If you
+change `MOUNT`, any path works (spaces included; the scripts compare against
+the escaped form in `/proc/mounts`), but keep it on a local, empty directory.
+The scripts only unmount a mount at `MOUNT` whose filesystem type is
+`fuse.tsshare`; any other filesystem mounted there makes the start script
+refuse, and the stop script leave it alone.
+
+A process is treated as the daemon only if its command name is `tsshare`, it
+has `-mount <MOUNT>`, and it is not the script itself or its parent. The pid
+file sits on the SD card and survives a power cycle: if the number in it is
+dead or belongs to something else, both scripts say "Removed stale pid file"
+and never signal that process.
+
+Ctrl-C in the start script (while it waits for `share.vhd`) only stops the
+script: the daemon keeps starting; run `tsshare_stop.sh` to stop it.
+
 The scripts only create `/media/fat/tsshare` and the files under
 `Scripts/.config/tsshare/` (`tsshare.log`, `tsshare.pid`, and the binary you put
 there). They edit no other file; they never touch `user-startup.sh` or other

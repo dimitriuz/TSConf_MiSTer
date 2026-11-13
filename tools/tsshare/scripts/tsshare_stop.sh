@@ -8,12 +8,36 @@ CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 # ---- test hooks (used by test_scripts.sh; leave alone on the board) ----
 PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-10}"
+# MOUNTS_FILE: see the lib below
 # --------------------------------------------------------
 
-is_mounted() {
-	grep -q " $MOUNT fuse" /proc/mounts 2>/dev/null
+# ---- BEGIN lib (identical in start and stop; test_scripts.sh diffs it) ----
+# MOUNTS_FILE is a test hook (a sample /proc/mounts).
+
+# $1 as it appears in /proc/mounts (octal escapes for \, space, tab)
+esc() {
+	printf '%s' "$1" | sed -e 's/\\/\\134/g' -e 's/ /\\040/g' \
+		-e "s/$(printf '\t')/\\\\011/g"
 }
 
+# fstype of the topmost mount exactly at $MOUNT (empty if none)
+mount_type() {
+	_m="$(esc "$MOUNT")"
+	_t=
+	while read -r _d _mp _ty _r; do
+		[ "$_mp" = "$_m" ] && _t="$_ty"
+	done < "${MOUNTS_FILE:-/proc/mounts}"
+	echo "$_t"
+}
+
+# only a mount made by tsshare (go-fuse Name "tsshare": fuse.tsshare)
+is_mounted() {
+	[ "$(mount_type)" = fuse.tsshare ]
+}
+
+# lazy unmount: root uses umount -l (the board has no fusermount),
+# a normal user (host tests) uses fusermount3 -uz.
+# Call only after is_mounted succeeded.
 lazy_umount() {
 	if [ "$(id -u)" = 0 ]; then
 		umount -l "$1" 2>/dev/null && return 0
@@ -24,30 +48,57 @@ lazy_umount() {
 	umount -l "$1" 2>/dev/null
 }
 
-is_ours() {
-	[ -n "$1" ] && kill -0 "$1" 2>/dev/null && \
-		grep -q tsshare "/proc/$1/cmdline" 2>/dev/null
+# alive and not a zombie (a dead child of this shell stays a zombie)
+alive() {
+	kill -0 "$1" 2>/dev/null && \
+		! grep -q '^State:.*Z' "/proc/$1/status" 2>/dev/null
 }
 
-scan_pid() {
-	ps w 2>/dev/null | grep tsshare | grep -v grep | grep -e "-mount $MOUNT" |
-		while read -r p rest; do
-			echo "$p"
-			break
+# is $1 our daemon for $MOUNT? argv[0] basename "tsshare", an argument
+# "-mount" followed by $MOUNT, and not this shell or its parent.
+is_ours() {
+	_p="$1"
+	case "$_p" in
+	"" | *[!0-9]*) return 1 ;;
+	esac
+	[ "$_p" != "$$" ] && [ "$_p" != "$PPID" ] || return 1
+	alive "$_p" || return 1
+	tr '\0' '\n' < "/proc/$_p/cmdline" 2>/dev/null | {
+		IFS= read -r _a0 || exit 1
+		[ "${_a0##*/}" = tsshare ] || exit 1
+		_prev=
+		while IFS= read -r _a; do
+			[ "$_prev" = -mount ] && [ "$_a" = "$MOUNT" ] && exit 0
+			_prev="$_a"
 		done
+		exit 1
+	}
 }
+
+# first pid in ps output that is our daemon (BusyBox or procps ps)
+scan_pid() {
+	for _c in $(ps w 2>/dev/null | grep tsshare | grep -v grep |
+		while read -r _x _r; do echo "$_x"; done); do
+		if is_ours "$_c"; then
+			echo "$_c"
+			return 0
+		fi
+	done
+	return 1
+}
+# ---- END lib ----
 
 # wait up to $1 seconds until the process is gone and the mount is gone
 wait_down() {
 	n=0
 	while [ "$n" -lt "$1" ]; do
-		if ! kill -0 "$PID" 2>/dev/null && ! is_mounted; then
+		if ! alive "$PID" && ! is_mounted; then
 			return 0
 		fi
 		sleep 1
 		n=$((n + 1))
 	done
-	! kill -0 "$PID" 2>/dev/null && ! is_mounted
+	! alive "$PID" && ! is_mounted
 }
 
 echo "If SD2 is still mounted in the OSD, eject"
@@ -56,14 +107,18 @@ echo "it or reset the core first."
 PID=""
 if [ -f "$PIDFILE" ]; then
 	P="$(cat "$PIDFILE" 2>/dev/null)"
-	is_ours "$P" && PID="$P"
+	if is_ours "$P"; then
+		PID="$P"
+	else
+		echo "Removed stale pid file (pid $P is not tsshare)."
+		rm -f "$PIDFILE"
+	fi
 fi
 [ -z "$PID" ] && PID="$(scan_pid)"
 
 if [ -z "$PID" ]; then
-	rm -f "$PIDFILE"
 	if is_mounted; then
-		echo "No daemon, but $MOUNT is mounted."
+		echo "No daemon, but a tsshare mount is left."
 		if lazy_umount "$MOUNT"; then
 			echo "Unmounted it (lazy)."
 		else
@@ -95,11 +150,11 @@ else
 		fi
 		is_mounted && lazy_umount "$MOUNT"
 	fi
-	if kill -0 "$PID" 2>/dev/null; then
+	if alive "$PID"; then
 		echo "FAILED: pid $PID will not die."
 		exit 1
 	fi
-	is_mounted && echo "WARNING: $MOUNT is still mounted"
+	is_mounted && echo "WARNING: still mounted"
 	echo "Stopped."
 fi
 rm -f "$PIDFILE"

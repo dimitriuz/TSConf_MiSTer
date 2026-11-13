@@ -28,6 +28,14 @@ type zipSource struct {
 
 	inflations atomic.Int64 // whole-entry inflations done (for tests)
 
+	// Change guard: size and mtime of the open zip, re-checked by fstat at
+	// most once per checkInterval. A detected change is sticky.
+	zsize   int64
+	zmtime  time.Time
+	now     func() time.Time // clock for the throttle (tests replace it)
+	lastChk atomic.Int64     // unix nanoseconds of the last fstat; 0 = never
+	changed atomic.Bool
+
 	smu     sync.Mutex
 	streams map[int]*zipStream
 }
@@ -51,6 +59,7 @@ func NewZipSource(zpath string, o SourceOptions) (Source, error) {
 	}
 	budget := int64(o.CacheMB) << 20
 	return &zipSource{zpath: zpath, f: f, zr: zr, budget: budget,
+		zsize: st.Size(), zmtime: st.ModTime(), now: time.Now,
 		cache: newByteCache(budget), streams: map[int]*zipStream{}}, nil
 }
 
@@ -247,7 +256,44 @@ func (s *zipSource) inflate(zf *zip.File) (*cdata, error) {
 	return buf, nil
 }
 
+// checkInterval throttles the fstat that guards against the zip being
+// rewritten in place (one syscall per second, not one per read; it matters on
+// network filesystems).
+const checkInterval = time.Second
+
+// errZipChanged is returned by every read once the open zip's size or mtime
+// differs from what was recorded at open. Stored entries are read straight
+// from the file and would otherwise return the new bytes without any error.
+var errZipChanged = errors.New("tsshare: zip changed on disk")
+
+// checkUnchanged returns errZipChanged once a change has been seen.
+func (s *zipSource) checkUnchanged() error {
+	if s.changed.Load() {
+		return errZipChanged
+	}
+	now := s.now().UnixNano()
+	last := s.lastChk.Load()
+	if last != 0 && now-last < int64(checkInterval) {
+		return nil
+	}
+	if !s.lastChk.CompareAndSwap(last, now) {
+		return nil // another reader is checking
+	}
+	st, err := s.f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() != s.zsize || !st.ModTime().Equal(s.zmtime) {
+		s.changed.Store(true)
+		return errZipChanged
+	}
+	return nil
+}
+
 func (s *zipSource) ReadFileAt(n *Node, p []byte, off int64) (int, error) {
+	if err := s.checkUnchanged(); err != nil {
+		return 0, err
+	}
 	if n.ID < 0 || n.ID >= len(s.files) {
 		return 0, fmt.Errorf("tsshare: bad node id %d", n.ID)
 	}

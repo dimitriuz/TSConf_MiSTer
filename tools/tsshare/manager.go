@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -54,10 +55,10 @@ type mvol struct {
 
 // mbuild is a build in flight for one key.
 type mbuild struct {
-	done    chan struct{}
-	waiters int // extra Acquires waiting for the result (under Manager.mu)
-	vol     *mvol
-	err     error
+	done chan struct{} // closed, under Manager.mu, once vol or err is set
+	refs int           // callers still waiting for the result (under Manager.mu)
+	vol  *mvol
+	err  error
 }
 
 type mentry struct {
@@ -172,8 +173,26 @@ func (v *mvol) stale(st os.FileInfo) string {
 	return ""
 }
 
-// Acquire returns a lease on the volume for spec, building it on first use.
+// Acquire is AcquireCtx with a context that is never cancelled. It can block
+// for the whole duration of a build, which is tens of seconds for a big source
+// on the target board.
 func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
+	return m.AcquireCtx(context.Background(), spec)
+}
+
+// AcquireCtx returns a lease on the volume for spec, building it on first use.
+//
+// A build can take tens of seconds on the target board. It runs in its own
+// goroutine, shared by every caller asking for the same key, so cancelling a
+// caller never aborts it: a cancelled caller (the one that started the build
+// or a waiter) returns ctx.Err() at once and gets no lease; if nobody is left
+// when the build finishes, the new volume simply goes idle and is kept for
+// IdleTTL, so a retry is instant. A ctx that is already cancelled returns its
+// error without touching anything.
+func (m *Manager) AcquireCtx(ctx context.Context, spec SourceSpec) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p, err := filepath.Abs(spec.Path)
 	if err != nil {
 		return nil, err
@@ -186,11 +205,16 @@ func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
 	isZip := !st.IsDir()
 
 	var toClose []*mvol
-	closeAll := func() {
+	var logs []string
+	flush := func() {
 		for _, v := range toClose {
 			m.closeVol(v, "replaced")
 		}
 		toClose = nil
+		for _, l := range logs {
+			m.logf("%s", l)
+		}
+		logs = nil
 	}
 
 	m.mu.Lock()
@@ -205,29 +229,25 @@ func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
 	}
 	if v := e.cur; v != nil {
 		if v.isZip != isZip {
-			// the path changed kind; treat as stale
 			m.retireLocked(e, &toClose)
-			m.logf("rebuild %s: kind changed", key)
+			logs = append(logs, fmt.Sprintf("rebuild %s: kind changed", key))
 		} else if why := v.stale(st); why == "" {
 			v.leases++
 			m.mu.Unlock()
 			return &Lease{m: m, v: v}, nil
 		} else {
-			m.logf("rebuild %s: %s", key, why)
+			logs = append(logs, fmt.Sprintf("rebuild %s: %s", key, why))
 			m.retireLocked(e, &toClose)
 		}
 	}
-	if b := e.building; b != nil {
-		b.waiters++
+	b := e.building
+	if b != nil {
+		b.refs++
 		m.mu.Unlock()
-		closeAll()
-		<-b.done
-		if b.err != nil {
-			return nil, b.err
-		}
-		return &Lease{m: m, v: b.vol}, nil
+		flush()
+		return m.await(ctx, b)
 	}
-	// This caller builds. Reserve a slot.
+	// Start a build. Reserve a slot.
 	leased := m.building
 	for v := range m.live {
 		if v.leases > 0 {
@@ -237,7 +257,7 @@ func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
 	if leased >= m.o.MaxVolumes {
 		m.cleanupEntryLocked(key, e)
 		m.mu.Unlock()
-		closeAll()
+		flush()
 		return nil, ErrBusy
 	}
 	if len(m.live)+m.building >= m.o.MaxVolumes {
@@ -249,18 +269,51 @@ func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
 			}
 		}
 		if old != nil {
-			m.logf("evict %s: idle, making room", old.key)
+			logs = append(logs, fmt.Sprintf("evict %s: idle, making room", old.key))
 			m.dropLocked(old)
 			toClose = append(toClose, old)
 		}
 	}
-	b := &mbuild{done: make(chan struct{})}
+	b = &mbuild{done: make(chan struct{}), refs: 1}
 	e.building = b
 	m.building++
 	m.mu.Unlock()
-	closeAll()
+	flush()
 
+	go m.runBuild(spec, key, st, isZip, e, b)
+	return m.await(ctx, b)
+}
+
+// await waits for build b, on which the caller holds one reference.
+func (m *Manager) await(ctx context.Context, b *mbuild) (*Lease, error) {
+	select {
+	case <-b.done:
+	case <-ctx.Done():
+		m.mu.Lock()
+		select {
+		case <-b.done:
+			// Finished meanwhile: the lease exists, give it back.
+			m.mu.Unlock()
+			if b.err == nil {
+				(&Lease{m: m, v: b.vol}).Release()
+			}
+		default:
+			b.refs-- // the builder will not count this caller
+			m.mu.Unlock()
+		}
+		return nil, ctx.Err()
+	}
+	if b.err != nil {
+		return nil, b.err
+	}
+	return &Lease{m: m, v: b.vol}, nil
+}
+
+// runBuild builds without any manager lock held and publishes the result to
+// every caller that still holds a reference.
+func (m *Manager) runBuild(spec SourceSpec, key string, st os.FileInfo, isZip bool, e *mentry, b *mbuild) {
 	nv, err := m.build(spec, key, st, isZip)
+	now := m.o.Now()
 
 	m.mu.Lock()
 	m.building--
@@ -277,16 +330,15 @@ func (m *Manager) Acquire(spec SourceSpec) (*Lease, error) {
 		}
 		close(b.done)
 		m.logf("build %s failed: %v", key, err)
-		return nil, err
+		return
 	}
-	nv.leases = 1 + b.waiters
-	nv.lastUsed = m.o.Now()
+	nv.leases = b.refs // 0 when every caller gave up: the volume is idle
+	nv.lastUsed = now
 	e.cur = nv
 	m.live[nv] = struct{}{}
 	b.vol = nv
-	m.mu.Unlock()
 	close(b.done)
-	return &Lease{m: m, v: nv}, nil
+	m.mu.Unlock()
 }
 
 // build runs OpenSource and NewVolume without any manager lock held. A panic
@@ -352,6 +404,7 @@ func (m *Manager) retireLocked(e *mentry, toClose *[]*mvol) {
 // Release gives the lease back; it is idempotent and safe after Close.
 func (l *Lease) Release() {
 	m := l.m
+	now := m.o.Now()
 	m.mu.Lock()
 	if l.released {
 		m.mu.Unlock()
@@ -362,7 +415,7 @@ func (l *Lease) Release() {
 	v.leases--
 	var doClose bool
 	if v.leases == 0 {
-		v.lastUsed = m.o.Now()
+		v.lastUsed = now
 		if v.retired {
 			delete(m.live, v)
 			doClose = true

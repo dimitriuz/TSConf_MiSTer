@@ -224,7 +224,10 @@ func (sd *shutdown) abortIfCancelled() {
 }
 
 func main() {
-	src := flag.String("src", "", "directory or zip file to share (required)")
+	src := flag.String("src", "", "directory or zip file to share (single-source mode; or use -view)")
+	view := flag.String("view", "", "view mode: root folder whose zips are shown as <name>.vhd, built when opened")
+	shared := flag.String("shared", "", "view mode: folder shown as shared.vhd (default <view>/shared, created if missing)")
+	idleMin := flag.Int("idle-min", 10, "view mode: minutes an unused volume is kept, 1 to 1440")
 	mnt := flag.String("mount", "", "mount point directory (required)")
 	label := flag.String("label", defaultLabel, "FAT volume label")
 	cacheMB := flag.Int("cache-mb", 32, "zip: MiB of inflated entries kept in memory, 1 to 256 (0 = the default, 32)")
@@ -234,9 +237,18 @@ func main() {
 	verbose := flag.Bool("v", false, "write one line per read to the -log file")
 	memMB := flag.Int("mem-limit-mb", 192, "soft Go heap limit in MiB (0 = off)")
 	flag.Parse()
-	if *src == "" || *mnt == "" {
+	if *view != "" && *src != "" {
+		fatal("-view and -src cannot be used together")
+	}
+	if (*src == "" && *view == "") || *mnt == "" {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if *view == "" && *shared != "" {
+		fatal("-shared needs -view")
+	}
+	if *idleMin < 1 || *idleMin > 1440 {
+		fatal("-idle-min %d out of range: use 1 to 1440", *idleMin)
 	}
 	if *verbose && *logPath == "" {
 		fatal("-v needs -log <file>")
@@ -270,6 +282,15 @@ func main() {
 			err = errors.New("not a directory")
 		}
 		fatal("bad -mount %s: %v", *mnt, err)
+	}
+
+	if *view != "" {
+		runView(sd, viewConfig{
+			zipRoot: *view, shared: *shared, mount: *mnt, label: *label, cacheMB: *cacheMB,
+			maxEntries: *maxEntries, fdLimit: *fdLimit, logPath: *logPath, verbose: *verbose,
+			idle: time.Duration(*idleMin) * time.Minute,
+		})
+		return
 	}
 
 	var rl *readLog

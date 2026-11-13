@@ -91,6 +91,7 @@ type daemon struct {
 	cmd    *exec.Cmd
 	mnt    string
 	stderr *bytes.Buffer
+	sb     *syncBuf // view-mode helpers capture stderr here
 	done   chan error
 	cancel context.CancelFunc
 }

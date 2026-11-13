@@ -120,12 +120,14 @@ lines, `serving share.vhd`) go to stderr; `tsshare_start.sh` redirects that to
 ## Geometry rules
 
 - MBR, one FAT32 partition type 0x0C starting at sector 128 (as the owner's
-  `boot.vhd`), 512-byte sectors, 32 reserved sectors, 2 FATs.
-- Cluster size is chosen from the content: 4 KB (8 sectors) whenever that gives
-  at least 65525 clusters (content of about 256 MB or more); smaller clusters
-  (down to 1 sector) only below that, because FAT32 needs 65525 clusters.
-  Larger clusters (up to 64 sectors) are used only if 4 KB would exceed the
-  FAT32 maximum cluster count. Only 4 KB is known to work on the board.
+  `boot.vhd`), 512-byte sectors, 2 FATs, 32 reserved sectors (padded so the
+  data area starts on a cluster boundary, as on the owner's card).
+- Clusters are 4 KB (8 sectors) whenever the content fits. FAT32 needs at
+  least 65525 clusters, so a source under about 256 MB is padded with free
+  clusters (virtual zeros, computed on demand: an empty source gives a
+  257 MiB virtual disk and costs no memory). Larger clusters (up to 64
+  sectors) are used only if 4 KB would exceed the FAT32 maximum cluster count.
+  Only 4 KB is known to work on the board.
 - A source needing more clusters than FAT32 allows is refused at start.
 - The disk is the partition plus a few MB of slack; free space is none to
   speak of.

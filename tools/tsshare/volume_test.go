@@ -66,12 +66,13 @@ func TestMBRAndBootSector(t *testing.T) {
 		t.Errorf("partition exceeds disk")
 	}
 	part := readAll(t, v, 128*512, 32*512)
+	rsv := int64(v.reserved)
 	bpb := part[:512]
 	le := binary.LittleEndian
 	if bpb[510] != 0x55 || bpb[511] != 0xAA {
 		t.Error("BPB signature")
 	}
-	if le.Uint16(bpb[11:]) != 512 || le.Uint16(bpb[14:]) != 32 || bpb[16] != 2 || bpb[21] != 0xF8 {
+	if le.Uint16(bpb[11:]) != 512 || int64(le.Uint16(bpb[14:])) != rsv || bpb[16] != 2 || bpb[21] != 0xF8 {
 		t.Errorf("BPB basics wrong: % x", bpb[:64])
 	}
 	if le.Uint32(bpb[28:]) != 128 || le.Uint32(bpb[32:]) != psec || le.Uint32(bpb[44:]) != 2 ||
@@ -92,8 +93,8 @@ func TestMBRAndBootSector(t *testing.T) {
 		t.Error("backup FSInfo differs")
 	}
 	fatSz := int64(le.Uint32(bpb[36:]))
-	fat1 := readAll(t, v, (128+32)*512, int(fatSz*512))
-	fat2 := readAll(t, v, (128+32+fatSz)*512, int(fatSz*512))
+	fat1 := readAll(t, v, (128+rsv)*512, int(fatSz*512))
+	fat2 := readAll(t, v, (128+rsv+fatSz)*512, int(fatSz*512))
 	if !bytes.Equal(fat1, fat2) {
 		t.Error("FATs differ")
 	}
@@ -104,7 +105,7 @@ func TestMBRAndBootSector(t *testing.T) {
 	nclus := int(bpb[13])
 	_ = nclus
 	free := 0
-	total := int(psec-32-2*uint32(fatSz)) / int(bpb[13])
+	total := int(psec-uint32(rsv)-2*uint32(fatSz)) / int(bpb[13])
 	for c := 2; c < total+2; c++ {
 		if le.Uint32(fat1[c*4:])&0x0FFFFFFF == 0 {
 			free++
@@ -114,7 +115,7 @@ func TestMBRAndBootSector(t *testing.T) {
 		t.Errorf("FSInfo free %d, FAT free %d", le.Uint32(fs[488:]), free)
 	}
 	// root directory: first entry is the volume label
-	dataStart := int64(128+32) + 2*fatSz
+	dataStart := 128 + rsv + 2*fatSz
 	root := readAll(t, v, dataStart*512, 32)
 	if string(root[:11]) != "MYSHARE    " || root[11] != 0x08 {
 		t.Errorf("root label entry % x", root)
@@ -199,16 +200,22 @@ func bigSource(size int64) *memSource {
 func TestSectorsPerCluster(t *testing.T) {
 	clusters := func(v *Volume) int { return int(v.totalClusters) }
 	v, _ := buildSmall(t, VolumeOptions{})
-	if v.spc != 1 || clusters(v) != 65525 {
-		t.Errorf("tiny tree: spc=%d clusters=%d", v.spc, clusters(v))
+	// 4 KiB clusters padded with free clusters to the FAT32 minimum:
+	// 512 FAT sectors, reserved 32 (32+2*512 is a multiple of 8), 65,525
+	// clusters of 8 sectors, a 257 MiB virtual disk.
+	if v.spc != 8 || clusters(v) != 65525 || v.fatSectors != 512 || v.reserved != 32 {
+		t.Errorf("tiny tree: spc=%d clusters=%d fat=%d reserved=%d", v.spc, clusters(v), v.fatSectors, v.reserved)
 	}
-	if v.Size() > 40<<20 {
-		t.Errorf("tiny volume is %d bytes", v.Size())
+	if v.Size() != 257<<20 {
+		t.Errorf("tiny volume is %d bytes, want 257 MiB", v.Size())
+	}
+	if v.dataStart%int64(v.spc) != 0 {
+		t.Errorf("data area start %d not cluster aligned", v.dataStart)
 	}
 	for _, c := range []struct {
 		size int64
 		spc  int
-	}{{100 << 20, 2}, {50 << 20, 1}, {150 << 20, 4}, {300 << 20, 8}, {20 << 30, 8}} {
+	}{{1 << 20, 8}, {50 << 20, 8}, {100 << 20, 8}, {150 << 20, 8}, {300 << 20, 8}, {20 << 30, 8}, {1536 << 30, 16}} {
 		v, _, err := NewVolume(bigSource(c.size), VolumeOptions{})
 		if err != nil {
 			t.Fatal(err)
@@ -221,6 +228,9 @@ func TestSectorsPerCluster(t *testing.T) {
 		}
 		if v.Size()%(1<<20) != 0 {
 			t.Errorf("size %d not 1MiB multiple", v.Size())
+		}
+		if v.dataStart%int64(v.spc) != 0 || v.reserved < 32 || v.reserved >= 32+int64(v.spc) {
+			t.Errorf("%d MiB: reserved=%d dataStart=%d not aligned to %d", c.size>>20, v.reserved, v.dataStart, v.spc)
 		}
 	}
 	v, _, err := NewVolume(bigSource(300<<20), VolumeOptions{SectorsPerCluster: 16})
@@ -432,9 +442,8 @@ func TestClusterCountBoundary4K(t *testing.T) {
 		spc      int
 		clusters uint32
 	}{
-		// 65,524 clusters is one short of FAT32's minimum: 2 KiB clusters
-		// are chosen and the file needs twice as many of them.
-		{65524, 4, 2*(65524-1) + 1},
+		// one short of FAT32's minimum: padded with a free cluster
+		{65524, 8, 65525},
 		{65525, 8, 65525},
 		{65526, 8, 65526},
 	} {
@@ -447,7 +456,7 @@ func TestClusterCountBoundary4K(t *testing.T) {
 			t.Errorf("content of %d 4K clusters: spc=%d clusters=%d, want spc=%d clusters=%d",
 				c.total, v.spc, v.totalClusters, c.spc, c.clusters)
 		}
-		if v.usedEnd != uint32(2+int64(c.clusters)) && c.total != 65524 {
+		if v.usedEnd != uint32(2+c.total) {
 			t.Errorf("usedEnd %d", v.usedEnd)
 		}
 	}
@@ -658,5 +667,56 @@ func TestSubdirectoryLimit(t *testing.T) {
 	}
 	if sub != 65534 {
 		t.Errorf("sub has %d children, want 65534", sub)
+	}
+}
+
+// A tiny source is padded with free clusters to 65,525 of them; the padding
+// is virtual: reads stay fast and allocate nothing proportional to it.
+func TestTinyVolumePaddingIsVirtual(t *testing.T) {
+	v, _, err := NewVolume(newMemSource(map[string]memFile{}), VolumeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.spc != 8 || v.totalClusters != 65525 || v.fatSectors != 512 || v.Size() != 257<<20 {
+		t.Fatalf("empty volume: spc=%d clusters=%d fat=%d size=%d", v.spc, v.totalClusters, v.fatSectors, v.Size())
+	}
+	buf := make([]byte, 1<<20)
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	start := time.Now()
+	for off := int64(0); off < v.Size(); off += 1 << 20 {
+		if _, err := v.ReadAt(buf, off); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&m1)
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("reading the whole padded disk took %v", el)
+	}
+	if grown := m1.TotalAlloc - m0.TotalAlloc; grown > 8<<20 {
+		t.Errorf("reading allocated %d bytes", grown)
+	}
+}
+
+// The data area starts on a cluster boundary for every cluster size and for
+// FAT sizes of every residue.
+func TestDataAreaAligned(t *testing.T) {
+	for _, spc := range []int{1, 2, 4, 8, 16, 32, 64, 128} {
+		for _, n := range []int{0, 1, 77, 5000} {
+			m := map[string]memFile{}
+			for i := 0; i < n; i++ {
+				m[fmt.Sprintf("F%05d.BIN", i)] = memFile{Size: 100000, ModTime: t0}
+			}
+			v, _, err := NewVolume(newMemSource(m), VolumeOptions{SectorsPerCluster: spc})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.dataStart%int64(spc) != 0 || v.reserved < 32 || v.reserved >= 32+int64(spc) {
+				t.Errorf("spc=%d n=%d: reserved=%d fat=%d dataStart=%d", spc, n, v.reserved, v.fatSectors, v.dataStart)
+			}
+			if v.rsvd == nil || int64(len(v.rsvd)) != v.reserved*512 {
+				t.Errorf("reserved area length %d", len(v.rsvd))
+			}
+		}
 	}
 }

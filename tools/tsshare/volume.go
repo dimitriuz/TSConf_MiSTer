@@ -12,7 +12,7 @@ import (
 
 const (
 	sectorSize       = 512
-	reservedSectors  = 32
+	minReserved      = 32 // sectors; padded so the data area is cluster aligned
 	minClusters      = 65525
 	maxClusters      = 0x0FFFFFF5
 	maxDirEntries    = 65536 // FAT32 directory limit (2 MiB)
@@ -62,10 +62,11 @@ type Volume struct {
 	usedEnd       uint32 // first unused cluster number
 	size          int64
 
-	head  []byte // MBR sector + gap to partition start is zero; this is sector 0 only
-	rsvd  []byte // the 32 reserved sectors of the partition
-	dirs  []dirExtent
-	files []fileExtent
+	head     []byte // MBR sector + gap to partition start is zero; this is sector 0 only
+	rsvd     []byte // the reserved sectors of the partition
+	reserved int64  // reserved sector count (>= minReserved)
+	dirs     []dirExtent
+	files    []fileExtent
 }
 
 // Size is the virtual disk size in bytes.
@@ -293,10 +294,10 @@ func NewVolume(src Source, opt VolumeOptions) (*Volume, []string, error) {
 			return nil, warns, fmt.Errorf("tsshare: bad sectors per cluster %d", spc)
 		}
 	} else {
+		// 4 KiB clusters whenever the content fits (the layout proven on a
+		// real card); small sources are padded with free clusters up to
+		// minClusters instead of shrinking the cluster size.
 		spc = 8
-		for spc > 1 && count(spc) < minClusters {
-			spc /= 2
-		}
 		for spc < 64 && count(spc) > maxClusters {
 			spc *= 2
 		}
@@ -313,7 +314,12 @@ func NewVolume(src Source, opt VolumeOptions) (*Volume, []string, error) {
 	if (int64(total)+2)*4%sectorSize != 0 {
 		v.fatSectors++
 	}
-	v.dataStart = reservedSectors + 2*v.fatSectors
+	// Pad the reserved area so the data area starts on a cluster boundary.
+	v.reserved = minReserved
+	for (v.reserved+2*v.fatSectors)%int64(spc) != 0 {
+		v.reserved++
+	}
+	v.dataStart = v.reserved + 2*v.fatSectors
 	v.partSectors = v.dataStart + int64(total)*int64(spc)
 	if v.partSectors >= 1<<32 || v.partSectors+v.partStart >= 1<<32 {
 		return nil, warns, errors.New("tsshare: volume too large for a 32-bit sector count")
@@ -382,13 +388,13 @@ func (v *Volume) buildHeader(label string) {
 	v.head = mbr
 
 	// reserved area
-	r := make([]byte, reservedSectors*sectorSize)
+	r := make([]byte, v.reserved*sectorSize)
 	b := r[:sectorSize]
 	b[0], b[1], b[2] = 0xEB, 0x58, 0x90
 	copy(b[3:11], "TSSHARE ")
 	le.PutUint16(b[11:], sectorSize)
 	b[13] = byte(v.spc)
-	le.PutUint16(b[14:], reservedSectors)
+	le.PutUint16(b[14:], uint16(v.reserved))
 	b[16] = 2
 	b[21] = 0xF8
 	le.PutUint16(b[24:], 63)
@@ -506,7 +512,7 @@ func (v *Volume) readPiece(p []byte, off int64) (int, error) {
 		return int(n), nil
 	}
 	po := off - partOff
-	rsvdBytes := int64(reservedSectors * sectorSize)
+	rsvdBytes := v.reserved * sectorSize
 	fatBytes := v.fatSectors * sectorSize
 	dataOff := v.dataStart * sectorSize
 	switch {

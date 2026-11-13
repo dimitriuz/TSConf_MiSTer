@@ -2,6 +2,8 @@
 package tsshare
 
 import (
+	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -141,9 +143,12 @@ func pack(stem, ext string) [11]byte {
 	return b
 }
 
-// Alias returns an 8.3 alias unique within this Namer. The stem keeps up to 6
-// characters plus ~N, shrinking as N grows so the stem is at most 8 bytes
-// (5+~10, 4+~100, 3+~1000, ...).
+// Alias returns an 8.3 alias unique within this Namer. long must already be
+// sanitized (see SanitizeName). The stem keeps up to 6 characters plus ~N,
+// shrinking as N grows so the stem is at most 8 bytes (5+~10, 4+~100,
+// 3+~1000, ...). Once N reaches 1000000 no stem character would fit, and
+// Alias switches to a deterministic hash alias: the first 2 stem characters,
+// 4 hex digits of a hash of long, and ~1 (then ~2.. on a clash).
 func (n *Namer) Alias(long string) (short [11]byte) {
 	stem, ext, lossy := basis(long)
 	if !lossy {
@@ -165,13 +170,31 @@ func (n *Namer) Alias(long string) (short [11]byte) {
 		tail := "~" + strconv.Itoa(N)
 		keep := min(8-len(tail), 6, len(stem))
 		if keep < 1 {
-			// Beyond ~9999999: cannot happen for a real directory.
-			panic("tsshare: alias tail overflow")
+			return n.hashAlias(long, stem, ext)
 		}
 		c := pack(stem[:keep]+tail, ext)
 		if !n.used[c] {
 			n.used[c] = true
 			n.next[key] = N + 1
+			return c
+		}
+	}
+}
+
+// hashAlias is Alias's last resort when the ~N counter has no room left.
+func (n *Namer) hashAlias(long, stem, ext string) [11]byte {
+	if len(stem) > 2 {
+		stem = stem[:2]
+	}
+	for salt := 0; ; salt++ {
+		h := fnv.New32a()
+		h.Write([]byte(long))
+		h.Write([]byte{byte(salt), byte(salt >> 8), byte(salt >> 16)})
+		sum := h.Sum32()
+		tail := 1 + salt/65536%9
+		c := pack(fmt.Sprintf("%s%04X~%d", stem, sum&0xFFFF, tail), ext)
+		if !n.used[c] {
+			n.used[c] = true
 			return c
 		}
 	}
@@ -220,7 +243,8 @@ func shortString(s [11]byte) string {
 // LFNEntries returns the long-name directory entries in on-disk order (last
 // sequence first, flagged 0x40). It returns none when long equals the
 // rendering of short exactly (an upper-case 8.3 name); lower-case 8.3 names
-// still get LFN entries.
+// still get LFN entries. long must already be sanitized (at most 255 UTF-16
+// units).
 func LFNEntries(long string, short [11]byte) [][32]byte {
 	if long == shortString(short) {
 		return nil

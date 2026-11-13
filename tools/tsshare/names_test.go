@@ -293,3 +293,32 @@ func TestLFNEntriesNotNeeded(t *testing.T) {
 		}
 	}
 }
+
+func TestAliasFallbackNoPanic(t *testing.T) {
+	// Push the ~N counter to where no stem room is left (~1000000 is 8 chars).
+	n := NewNamer()
+	n.next["LONGNA\x00TXT"] = 1000000
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		a := n.Alias("LongName.txt")
+		s := short(a)
+		if seen[s] {
+			t.Fatalf("duplicate alias %q", s)
+		}
+		seen[s] = true
+		if string(a[8:]) != "TXT" || !strings.Contains(string(a[:8]), "~") {
+			t.Fatalf("bad fallback alias %q", s)
+		}
+		if i == 0 && !strings.HasPrefix(s, "LO") {
+			t.Errorf("fallback alias %q should keep 2 stem chars", s)
+		}
+	}
+	// Deterministic: the same history gives the same aliases.
+	n2 := NewNamer()
+	n2.next["LONGNA\x00TXT"] = 1000000
+	n3 := NewNamer()
+	n3.next["LONGNA\x00TXT"] = 1000000
+	if n2.Alias("LongName.txt") != n3.Alias("LongName.txt") {
+		t.Error("fallback is not deterministic")
+	}
+}

@@ -324,8 +324,8 @@ func main() {
 	debug.FreeOSMemory() // hand the scan's garbage (zip directory, name maps) back to the OS
 	g := vol.Geometry()
 	fmt.Fprintf(os.Stderr, "tree: %d files, %d directories (including the root)\n", g.Files, g.Dirs)
-	fmt.Fprintf(os.Stderr, "volume: %d sectors/cluster, %d clusters, %d FAT sectors, partition at sector %d, disk %d bytes\n",
-		g.SectorsPerCluster, g.Clusters, g.FATSectors, g.PartStart, g.DiskBytes)
+	fmt.Fprintf(os.Stderr, "volume: %d sectors/cluster, %d clusters, %d FAT sectors, partition at sector %d, %d reserved, data at partition sector %d, disk %d bytes\n",
+		g.SectorsPerCluster, g.Clusters, g.FATSectors, g.PartStart, g.Reserved, g.DataStart, g.DiskBytes)
 	fmt.Fprintf(os.Stderr, "%d warnings\n", len(warns))
 	for i, w := range warns {
 		if i == maxShownWarnings {

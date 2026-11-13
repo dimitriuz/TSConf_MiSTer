@@ -14,7 +14,7 @@ Peak RSS is `VmHWM` from `/proc/<pid>/status` (there is no `/usr/bin/time`).
 | --- | --- |
 | SD.zip start-up (scan + volume build, then `share.vhd` visible) | 0.42 s cold page cache, 0.35 s warm; "built in" 398 / 327 ms |
 | SD.zip warnings | none (0) |
-| SD.zip geometry | 57,353 files, 1,034 dirs (incl. root), 8 sectors/cluster, 912,542 clusters, 7,130 FAT sectors, partition at sector 128 (7,314,628 sectors), disk 3,745,513,472 bytes |
+| SD.zip geometry | 57,353 files, 1,034 dirs (incl. root), 8 sectors/cluster, 912,542 clusters, 7,130 FAT sectors, partition at sector 128 (7,314,632 sectors: 36 reserved, 2 x 7,130 FAT, data area at partition sector 14,296, cluster aligned), disk 3,745,513,472 bytes |
 | Peak RSS, SD.zip, default **32 MB** cache (`-mem-limit-mb 192`) | 58 MB after the scan, 100 MB after one full sequential read, 105 MB at exit after a verification session. With the former 64 MB default: 58 / 135 / 145.5 MB (see section 2 and 4) |
 | `fsck.vfat -n` on SD.zip partition | clean, exit 0: `58387 files, 912542/912542 clusters` |
 | Content check against the zip | all 57,353 entries equal (md5, Python `zipfile` as the independent reader); includes 300 random, the 20 largest, all 29 non-ASCII names |
@@ -41,7 +41,7 @@ tsshare -src tree -mount mnt1 -log scale.log
 | Measure | Result |
 | --- | --- |
 | Start-up (mount visible) | 0.13 s wall; "built in 111 ms" (49-59 ms in earlier runs) |
-| Geometry | 5,000 files, 300 dirs (incl. root), 8 sectors/cluster, 3,148,425 clusters, 24,598 FAT sectors, disk 12,921,602,048 bytes |
+| Geometry (measured before the data-area alignment, which now adds 4 reserved sectors here) | 5,000 files, 300 dirs (incl. root), 8 sectors/cluster, 3,148,425 clusters, 24,598 FAT sectors, disk 12,921,602,048 bytes |
 | Warnings | 9, all "renamed" (the generator cuts some long names after a space; the trailing space is trimmed) |
 | Peak RSS | 17 MB after start-up; 38 MB after reading the whole 12.9 GB (`dd bs=1M`, 8.8 s, 1.5 GB/s); the first binary measured 20 MB / 58-63 MB |
 | `fsck.vfat -n` (partition extracted with `dd bs=1M iflag=skip_bytes,count_bytes skip=65536`) | clean, exit 0: `5300 files, 3148425/3148425 clusters` (0.2 s) |
@@ -60,7 +60,8 @@ cache is not controlled). Cold: 0.417 s to `share.vhd`, "built in 398 ms"
 (0.31 s in another run).
 
 Printed counts: `tree: 57353 files, 1034 directories (including the root)`;
-`volume: 8 sectors/cluster, 912542 clusters, 7130 FAT sectors, partition at sector 128, disk 3745513472 bytes`.
+`volume: 8 sectors/cluster, 912542 clusters, 7130 FAT sectors, partition at sector 128, 36 reserved, data at partition sector 14296, disk 3745513472 bytes`
+(re-run after the data-area alignment: before it the partition had 7,314,628 sectors and 32 reserved; `fsck.vfat -n` still clean, `58387 files, 912542/912542 clusters`, and `fatcheck.py zip` 40 random plus all 29 non-ASCII entries equal to Python's zipfile).
 **Warnings: 0.** No name was renamed, truncated or dropped (longest name 149 chars,
 longest path 200 chars, 29 non-ASCII entries); the zip has no duplicate,
 encrypted, `..`, oversized or unsupported entries.

@@ -618,6 +618,8 @@ type Geometry struct {
 	SectorsPerCluster int
 	Clusters          uint32 // clusters of the data area
 	FATSectors        int64
+	Reserved          int64 // reserved sectors
+	DataStart         int64 // partition-relative sector of cluster 2
 	PartStart         int64 // sector
 	Dirs, Files       int   // including the root directory
 	DiskBytes         int64
@@ -625,5 +627,5 @@ type Geometry struct {
 
 // Geometry reports the volume layout.
 func (v *Volume) Geometry() Geometry {
-	return Geometry{v.spc, v.totalClusters, v.fatSectors, v.partStart, len(v.dirs), len(v.files), v.size}
+	return Geometry{v.spc, v.totalClusters, v.fatSectors, v.reserved, v.dataStart, v.partStart, len(v.dirs), len(v.files), v.size}
 }

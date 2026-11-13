@@ -10,8 +10,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,19 +22,61 @@ import (
 )
 
 type readLog struct {
-	mu sync.Mutex
-	w  *bufio.Writer
-	f  *os.File
+	ch      chan string
+	stop    chan struct{}
+	done    chan struct{}
+	dropped atomic.Int64
+	once    sync.Once
 }
 
-func (l *readLog) add(off int64, n int, kind string, lat time.Duration) {
+func newReadLog(f *os.File) *readLog {
+	l := &readLog{ch: make(chan string, 1<<16), stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(l.done)
+		w := bufio.NewWriter(f)
+		tk := time.NewTicker(100 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case s := <-l.ch:
+				w.WriteString(s)
+			case <-tk.C:
+				w.Flush()
+			case <-l.stop:
+				for {
+					select {
+					case s := <-l.ch:
+						w.WriteString(s)
+					default:
+						w.Flush()
+						return
+					}
+				}
+			}
+		}
+	}()
+	return l
+}
+
+// add never blocks the reply path: the line is dropped (and counted) if the queue is full.
+func (l *readLog) add(ts int64, off int64, n int, kind string, lat time.Duration) {
 	if l == nil {
 		return
 	}
-	l.mu.Lock()
-	fmt.Fprintf(l.w, "%d %d %d %s %d\n", time.Now().UnixNano(), off, n, kind, lat.Microseconds())
-	l.w.Flush()
-	l.mu.Unlock()
+	select {
+	case l.ch <- fmt.Sprintf("%d %d %d %s %d\n", ts, off, n, kind, lat.Microseconds()):
+	default:
+		l.dropped.Add(1)
+	}
+}
+
+func (l *readLog) close() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() { close(l.stop) })
+	<-l.done
+	log.Printf("read log closed, dropped %d lines", l.dropped.Load())
 }
 
 type root struct {
@@ -96,7 +140,8 @@ func (v *vhdFile) Read(ctx context.Context, f fs.FileHandle, dest []byte, off in
 	n, err := v.backing.ReadAt(dest, off)
 	if err != nil && err != io.EOF {
 		log.Printf("backing read error at %d: %v", off, err)
-		n = 0 // answer with zeros rather than hang or fail
+		v.log.add(time.Now().UnixNano(), off, len(dest), "error", time.Since(start))
+		return nil, syscall.EIO
 	}
 	for i := n; i < len(dest); i++ {
 		dest[i] = 0
@@ -105,7 +150,7 @@ func (v *vhdFile) Read(ctx context.Context, f fs.FileHandle, dest []byte, off in
 	if n == 0 {
 		kind = "synthetic"
 	}
-	v.log.add(off, len(dest), kind, time.Since(start))
+	v.log.add(time.Now().UnixNano(), off, len(dest), kind, time.Since(start))
 	return fuse.ReadResultData(dest), 0
 }
 
@@ -127,14 +172,18 @@ func main() {
 	defer bf.Close()
 	var rl *readLog
 	if *logPath != "" {
-		lf, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		lf, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer lf.Close()
-		rl = &readLog{w: bufio.NewWriter(lf), f: lf}
+		rl = newReadLog(lf)
 	}
 	v := &vhdFile{backing: bf, size: *size, delay: *delay, log: rl}
+	// Install the handler before mounting; the buffered channel queues a signal
+	// that arrives while Mount is still running.
+	sig := make(chan os.Signal, 4)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	// DirectMount falls back to fusermount when not root (local testing).
 	srv, err := fs.Mount(*mnt, &root{vhd: v}, &fs.Options{
 		MountOptions: fuse.MountOptions{
@@ -147,16 +196,36 @@ func main() {
 	if err != nil {
 		log.Fatalf("mount: %v", err)
 	}
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		s := <-sig
 		log.Printf("got %v, unmounting", s)
 		if err := srv.Unmount(); err != nil {
-			log.Printf("unmount: %v", err)
+			log.Printf("unmount: %v; trying lazy unmount", err)
+			if err := lazyUnmount(*mnt); err != nil {
+				log.Printf("lazy unmount: %v", err)
+			}
 		}
+		s = <-sig
+		log.Printf("got %v again, lazy unmount and exit", s)
+		if err := lazyUnmount(*mnt); err != nil {
+			log.Printf("lazy unmount: %v", err)
+		}
+		rl.close()
+		os.Exit(1)
 	}()
 	log.Printf("serving %s (%d bytes) from %s at %s", "share.vhd", *size, *backing, *mnt)
 	srv.Wait()
+	rl.close()
 	log.Printf("exiting")
+}
+
+func lazyUnmount(mnt string) error {
+	if os.Geteuid() == 0 {
+		return syscall.Unmount(mnt, syscall.MNT_DETACH)
+	}
+	out, err := exec.Command("fusermount3", "-uz", mnt).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, out)
+	}
+	return nil
 }

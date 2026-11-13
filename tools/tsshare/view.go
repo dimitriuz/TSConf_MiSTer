@@ -684,6 +684,7 @@ type viewConfig struct {
 	logPath                string
 	verbose                bool
 	idle                   time.Duration
+	maxVolumes             int
 }
 
 // runView mounts the view and serves it until unmounted. Nothing is scanned at
@@ -754,9 +755,11 @@ func runView(sd *shutdown, c viewConfig) {
 	fmt.Fprintf(os.Stderr, "view: zip root %s\n", c.zipRoot)
 	fmt.Fprintf(os.Stderr, "view: shared folder %s\n", c.shared)
 	fmt.Fprintf(os.Stderr, "view: mount %s\n", c.mount)
+	fmt.Fprintf(os.Stderr, "view: up to %d volumes alive\n", c.maxVolumes)
 	sd.abortIfCancelled()
 
 	mgr = NewManager(ManagerOptions{
+		MaxVolumes: c.maxVolumes,
 		IdleTTL:    c.idle,
 		Source:     SourceOptions{CacheMB: c.cacheMB, FDLimit: c.fdLimit},
 		Volume:     VolumeOptions{Label: c.label, MaxEntries: c.maxEntries},

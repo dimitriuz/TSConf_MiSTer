@@ -429,6 +429,9 @@ func (s *zipSource) readStream(id int, zf *zip.File, p []byte, off int64) (total
 	return total, nil
 }
 
+// DropCaches frees the inflated-entry cache; reads inflate again on demand.
+func (s *zipSource) DropCaches() { s.cache.dropAll() }
+
 func (s *zipSource) Close() error {
 	s.smu.Lock()
 	for _, st := range s.streams {

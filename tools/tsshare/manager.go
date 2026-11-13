@@ -25,7 +25,7 @@ type SourceSpec struct {
 
 // ManagerOptions configures a Manager. Zero values pick the defaults.
 type ManagerOptions struct {
-	MaxVolumes int           // volumes in use at once; default 3
+	MaxVolumes int           // volumes alive at once (leased or building); default 2
 	IdleTTL    time.Duration // an unused volume is freed after this; default 10m
 	Source     SourceOptions // passed to OpenSource
 	Volume     VolumeOptions // passed to NewVolume (Label etc.)
@@ -91,7 +91,7 @@ type Lease struct {
 // NewManager returns a manager and, unless o.NoTicker, starts its sweeper.
 func NewManager(o ManagerOptions) *Manager {
 	if o.MaxVolumes <= 0 {
-		o.MaxVolumes = 3
+		o.MaxVolumes = 2
 	}
 	if o.IdleTTL <= 0 {
 		o.IdleTTL = 10 * time.Minute
@@ -198,6 +198,10 @@ func (m *Manager) AcquireCtx(ctx context.Context, spec SourceSpec) (*Lease, erro
 		return nil, err
 	}
 	key := filepath.Clean(p)
+	// Two names for one zip (a symlink) must share one volume.
+	if r, err := filepath.EvalSymlinks(key); err == nil {
+		key = r
+	}
 	st, err := os.Stat(key)
 	if err != nil {
 		return nil, err
@@ -413,17 +417,22 @@ func (l *Lease) Release() {
 	l.released = true
 	v := l.v
 	v.leases--
-	var doClose bool
+	var doClose, drop bool
 	if v.leases == 0 {
 		v.lastUsed = now
 		if v.retired {
 			delete(m.live, v)
 			doClose = true
+		} else {
+			drop = true
 		}
 	}
 	m.mu.Unlock()
 	if doClose {
 		m.closeVol(v, "last lease released")
+	} else if drop {
+		// Keep the tree for a quick reopen, give back the data cache.
+		v.v.DropCaches()
 	}
 }
 

@@ -73,6 +73,14 @@ type Volume struct {
 // Size is the virtual disk size in bytes.
 func (v *Volume) Size() int64 { return v.size }
 
+// DropCaches frees the source's data caches (the zip's inflated entries), if
+// it has any. The tree and extent table stay, so reads keep working.
+func (v *Volume) DropCaches() {
+	if d, ok := v.src.(interface{ DropCaches() }); ok {
+		d.DropCaches()
+	}
+}
+
 // Close closes the source.
 func (v *Volume) Close() error { return v.src.Close() }
 

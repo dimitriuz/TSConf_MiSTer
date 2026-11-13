@@ -228,6 +228,7 @@ func main() {
 	view := flag.String("view", "", "view mode: root folder whose zips are shown as <name>.vhd, built when opened")
 	shared := flag.String("shared", "", "view mode: folder shown as shared.vhd (default <view>/shared, created if missing)")
 	idleMin := flag.Int("idle-min", 10, "view mode: minutes an unused volume is kept, 1 to 1440")
+	maxVols := flag.Int("max-volumes", 2, "view mode: volumes alive at once, 1 to 3 (each holds a tree of up to about 47 MB)")
 	mnt := flag.String("mount", "", "mount point directory (required)")
 	label := flag.String("label", defaultLabel, "FAT volume label")
 	cacheMB := flag.Int("cache-mb", 32, "zip: MiB of inflated entries kept in memory, 1 to 256 (0 = the default, 32)")
@@ -246,6 +247,9 @@ func main() {
 	}
 	if *view == "" && *shared != "" {
 		fatal("-shared needs -view")
+	}
+	if *maxVols < 1 || *maxVols > 3 {
+		fatal("-max-volumes %d out of range: use 1 to 3", *maxVols)
 	}
 	if *idleMin < 1 || *idleMin > 1440 {
 		fatal("-idle-min %d out of range: use 1 to 1440", *idleMin)
@@ -288,7 +292,7 @@ func main() {
 		runView(sd, viewConfig{
 			zipRoot: *view, shared: *shared, mount: *mnt, label: *label, cacheMB: *cacheMB,
 			maxEntries: *maxEntries, fdLimit: *fdLimit, logPath: *logPath, verbose: *verbose,
-			idle: time.Duration(*idleMin) * time.Minute,
+			idle: time.Duration(*idleMin) * time.Minute, maxVolumes: *maxVols,
 		})
 		return
 	}

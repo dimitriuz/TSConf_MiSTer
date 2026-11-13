@@ -578,42 +578,51 @@ func TestViewReadOnly(t *testing.T) {
 
 func TestViewBusy(t *testing.T) {
 	needFuse(t)
-	e := newViewEnv(t)
-	var open []*os.File
-	for _, n := range []string{"A.vhd", "b.vhd", "sub/c.vhd"} {
-		f, err := os.Open(e.p(n))
-		if err != nil {
-			t.Fatalf("open %s: %v", n, err)
-		}
-		open = append(open, f)
-		defer f.Close()
-	}
-	if err := openErr(e.p("shared.vhd")); !errors.Is(err, syscall.EBUSY) {
-		t.Fatalf("4th open: %v, want EBUSY", err)
-	}
-	// the same file again does not need a slot
-	f2, err := os.Open(e.p("A.vhd"))
-	if err != nil {
-		t.Fatalf("second handle of A.vhd: %v", err)
-	}
-	f2.Close()
-	for i, f := range open {
-		buf := make([]byte, 512)
-		if _, err := f.ReadAt(buf, 0); err != nil {
-			t.Errorf("read %d: %v", i, err)
-		}
-	}
-	open[0].Close()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		err := openErr(e.p("shared.vhd"))
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EBUSY) || time.Now().After(deadline) {
-			t.Fatalf("open after a release: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		n     int // volumes that can be leased at once
+	}{{"default 2", nil, 2}, {"max-volumes 3", []string{"-max-volumes", "3"}, 3}, {"max-volumes 1", []string{"-max-volumes", "1"}, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newViewEnv(t, tc.extra...)
+			names := []string{"A.vhd", "b.vhd", "sub/c.vhd", "shared.vhd"}
+			var open []*os.File
+			for _, n := range names[:tc.n] {
+				f, err := os.Open(e.p(n))
+				if err != nil {
+					t.Fatalf("open %s: %v", n, err)
+				}
+				open = append(open, f)
+				defer f.Close()
+			}
+			if err := openErr(e.p(names[tc.n])); !errors.Is(err, syscall.EBUSY) {
+				t.Fatalf("open #%d: %v, want EBUSY", tc.n+1, err)
+			}
+			// the same file again does not need a slot
+			f2, err := os.Open(e.p(names[0]))
+			if err != nil {
+				t.Fatalf("second handle of %s: %v", names[0], err)
+			}
+			f2.Close()
+			for i, f := range open {
+				buf := make([]byte, 512)
+				if _, err := f.ReadAt(buf, 0); err != nil {
+					t.Errorf("read %d: %v", i, err)
+				}
+			}
+			open[0].Close()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				err := openErr(e.p(names[tc.n]))
+				if err == nil {
+					break
+				}
+				if !errors.Is(err, syscall.EBUSY) || time.Now().After(deadline) {
+					t.Fatalf("open after a release: %v", err)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
 	}
 }
 
@@ -768,6 +777,11 @@ func TestViewFlags(t *testing.T) {
 	if c, _ := run("-view", root); c != 2 {
 		t.Errorf("-view without -mount: exit %d", c)
 	}
+	for _, v := range []string{"0", "4", "-1"} {
+		if c, out := run("-view", root, "-mount", mnt, "-max-volumes", v); c != 2 || !strings.Contains(out, "max-volumes") {
+			t.Errorf("-max-volumes %s: exit %d\n%s", v, c, out)
+		}
+	}
 	for _, v := range []string{"0", "1441", "-5"} {
 		if c, out := run("-view", root, "-mount", mnt, "-idle-min", v); c != 2 || !strings.Contains(out, "idle-min") {
 			t.Errorf("-idle-min %s: exit %d\n%s", v, c, out)
@@ -794,6 +808,9 @@ func TestViewFlags(t *testing.T) {
 	d := startView(t, mnt, root, "-view", root, "-mount", mnt, "-idle-min", "1")
 	if st, err := os.Stat(filepath.Join(root, "shared")); err != nil || !st.IsDir() {
 		t.Errorf("default shared folder not created: %v", err)
+	}
+	if !strings.Contains(d.sb.String(), "view: up to 2 volumes alive") {
+		t.Errorf("no volume limit line:\n%s", d.sb)
 	}
 	if !strings.Contains(d.sb.String(), "created shared folder") {
 		t.Errorf("no creation line:\n%s", d.sb)

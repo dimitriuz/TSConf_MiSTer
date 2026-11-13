@@ -342,6 +342,38 @@ func (c *byteCache) acquire(id int, pin bool, load func() (*cdata, error)) (*zen
 	return e, nil
 }
 
+// dropAll empties the cache: every loaded entry leaves the LRU (entries a
+// reader still holds are accounted as dead until released, like evicted ones)
+// and the free list is cleared, so the memory goes back to the GC. Loads in
+// flight are left alone.
+func (c *byteCache) dropAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for el := c.lru.Back(); el != nil; el = c.lru.Back() {
+		v := el.Value.(*zentry)
+		c.lru.Remove(el)
+		delete(c.m, v.id)
+		c.total -= v.data.size()
+		switch {
+		case v.shared:
+		case v.pins > 0:
+			v.dead = true
+			c.deadBytes += v.data.size()
+			c.deadSet[v] = struct{}{}
+		default:
+			c.recycleLocked(v.data)
+		}
+	}
+	c.free = nil
+}
+
+// bytesHeld reports the bytes accounted in the cache (live and dead entries).
+func (c *byteCache) bytesHeld() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total + c.deadBytes
+}
+
 // release drops a pin taken by acquire.
 func (c *byteCache) release(e *zentry, pinned bool) {
 	if !pinned {

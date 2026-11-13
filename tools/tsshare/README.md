@@ -165,7 +165,9 @@ browsing), never a disk.
   while the image is open. The cache is dropped when the last handle of a source
   closes; the tree stays for the idle time, so a quick reopen is still instant
   (entries are inflated again on demand). Worst case with the defaults: two
-  volumes of about 47 MB plus one cache of at most 32 MB, about 126 MB.
+  volumes of about 47 MB, both being read at once, plus two caches of at most
+  32 MB each, about 158 MB (below the 192 MB soft limit); typically one volume
+  is in use and the total stays near 80 MB.
   A small zip or folder costs little. Peak memory in view mode on the board has
   not been measured.
 
@@ -409,7 +411,7 @@ NOT verified on the board:
 | Slow start | The scan walks every entry once: slow NAS metadata makes it slow (the real zip took 0.4 s on the host). The start script waits 90 s. A folder on a slow share can take longer; start from a shell to watch the log. |
 | `Transport endpoint is not connected` | The daemon died without unmounting. Run `tsshare_stop.sh` (or `umount -l <MOUNT>`). |
 | Start says already running | Run `tsshare_stop.sh`, then start again. |
-| A zip opens with an error in view mode | Three sources are already open (`EBUSY`), or the zip changed while the image was open. Eject and try again. |
+| A zip opens with an error in view mode | `-max-volumes` sources (default 2) are already open (`EBUSY`), or the zip changed while the image was open. Eject and try again. |
 | Start refuses: MOUNT inside SHARED (or SHARED inside MOUNT, ZIPROOT inside MOUNT) | Pick a `MOUNT` that is a separate folder from the other two. |
 | Start says "must be an absolute path" | `ZIPROOT`, `SHARED` and `MOUNT` must start with `/`. |
 | The start message ends in `...` | Long paths are shortened to their last 52 characters; the log (`tsshare.log`) has the full text. |

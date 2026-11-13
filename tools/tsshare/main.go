@@ -218,6 +218,11 @@ func main() {
 	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("tsshare: ")
+	if os.Getenv("GOGC") == "" {
+		// The live heap is mostly the cache and the tree; at the default 100%
+		// the collector would let it double (about 220 MB on SD.zip).
+		debug.SetGCPercent(10)
+	}
 	if *memMB > 0 {
 		debug.SetMemoryLimit(int64(*memMB) << 20)
 	}
@@ -284,6 +289,7 @@ func main() {
 	}
 	sd.abortIfCancelled()
 	built := time.Since(t0)
+	debug.FreeOSMemory() // hand the scan's garbage (zip directory, name maps) back to the OS
 	g := vol.Geometry()
 	fmt.Fprintf(os.Stderr, "tree: %d files, %d directories (including the root)\n", g.Files, g.Dirs)
 	fmt.Fprintf(os.Stderr, "volume: %d sectors/cluster, %d clusters, %d FAT sectors, partition at sector %d, disk %d bytes\n",

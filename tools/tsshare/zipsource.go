@@ -206,25 +206,36 @@ func (s *zipSource) Tree() (*Node, []string, error) {
 		nodes[full] = n
 	}
 	s.offs = make([]atomic.Int64, len(s.files))
+	// Extra and Comment are only read while the central directory is parsed;
+	// dropping them frees the per-entry buffer they point into (about a third
+	// of the retained zip directory).
+	for _, zf := range s.files {
+		zf.Extra, zf.Comment = nil, ""
+	}
 	return root, warns, nil
 }
 
-// inflate reads a whole deflated entry, verifying size and CRC.
-func (s *zipSource) inflate(zf *zip.File) ([]byte, error) {
+// inflate reads a whole deflated entry into cache blocks, verifying size and
+// CRC.
+func (s *zipSource) inflate(zf *zip.File) (*cdata, error) {
 	rc, err := zf.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	buf := make([]byte, zf.UncompressedSize64)
-	if _, err := io.ReadFull(rc, buf); err != nil {
-		return nil, fmt.Errorf("%s: %s: %w", s.zpath, zf.Name, err)
+	buf := s.cache.alloc(int(zf.UncompressedSize64))
+	for off := 0; off < buf.n; off += blockSize {
+		if _, err := io.ReadFull(rc, buf.blk[off/blockSize][:min(blockSize, buf.n-off)]); err != nil {
+			s.cache.discard(buf)
+			return nil, fmt.Errorf("%s: %s: %w", s.zpath, zf.Name, err)
+		}
 	}
 	var one [1]byte
 	if k, err := rc.Read(one[:]); k != 0 || err != io.EOF {
 		if err == nil || err == io.EOF {
 			err = errors.New("entry longer than its recorded size")
 		}
+		s.cache.discard(buf)
 		return nil, fmt.Errorf("%s: %s: %w", s.zpath, zf.Name, err)
 	}
 	s.inflations.Add(1)
@@ -256,11 +267,8 @@ func (s *zipSource) ReadFileAt(n *Node, p []byte, off int64) (int, error) {
 	case size > s.budget:
 		k, err = s.readStream(n.ID, zf, p, off)
 	default:
-		var data []byte
-		data, err = s.cache.get(n.ID, func() ([]byte, error) { return s.inflate(zf) })
-		if err == nil {
-			k = copy(p, data[off:])
-		}
+		err = s.cache.with(n.ID, func() (*cdata, error) { return s.inflate(zf) },
+			func(d *cdata) { k = d.copyAt(p, off) })
 	}
 	if err == nil && short {
 		err = io.EOF

@@ -766,3 +766,77 @@ func TestZipConcurrentStream(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestCdata(t *testing.T) {
+	for _, n := range []int{0, 1, blockSize - 1, blockSize, blockSize + 1, 5*blockSize + 7} {
+		b := randBytes(int64(n), n)
+		d := cdataOf(b)
+		if len(d.blk) != (n+blockSize-1)/blockSize || !bytes.Equal(d.bytes(), b) {
+			t.Errorf("n=%d: %d blocks, contents differ", n, len(d.blk))
+		}
+		for _, off := range []int64{0, 1, blockSize - 1, blockSize, int64(n) - 1, int64(n), int64(n) + 5} {
+			if off < 0 {
+				continue
+			}
+			p := make([]byte, 3*blockSize/2)
+			k := d.copyAt(p, off)
+			want := 0
+			if off < int64(n) {
+				want = min(len(p), n-int(off))
+			}
+			if k != want || (k > 0 && !bytes.Equal(p[:k], b[off:int(off)+k])) {
+				t.Errorf("n=%d off=%d: copied %d, want %d", n, off, k, want)
+			}
+		}
+	}
+}
+
+// Buffers of evicted entries are recycled; a buffer pinned by a reader is
+// never recycled under it.
+func TestCacheRecycleSafe(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "r.zip")
+	var ents []zent
+	data := map[string][]byte{}
+	for i := 0; i < 40; i++ {
+		n := fmt.Sprintf("f%02d", i)
+		d := randBytes(int64(i), 60_000+i*1000)
+		data[n] = d
+		ents = append(ents, zent{name: n, data: d, method: zip.Deflate})
+	}
+	buildZip(t, p, ents)
+	s, _ := NewZipSource(p, SourceOptions{CacheMB: 1})
+	defer s.Close()
+	_, _, tree := listTree(t, s)
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(g)))
+			for k := 0; k < 150; k++ {
+				n := fmt.Sprintf("f%02d", r.Intn(40))
+				d := data[n]
+				ln := 1 + r.Intn(len(d)-1)
+				off := int64(r.Intn(len(d) - ln))
+				b, err := readNode(t, s, findNode(tree, n), off, ln)
+				if err != nil || !bytes.Equal(b, d[off:off+int64(ln)]) {
+					t.Errorf("%s @%d+%d: %v", n, off, ln, err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	c := s.(*zipSource).cache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.free) == 0 {
+		t.Error("no buffer was recycled")
+	}
+	if int64(len(c.free))*blockSize > c.freeMax || c.total > c.budget {
+		t.Errorf("free %d blocks (max %d bytes), total %d (budget %d)", len(c.free), c.freeMax, c.total, c.budget)
+	}
+	if len(c.m) != c.lru.Len() {
+		t.Errorf("map %d != lru %d", len(c.m), c.lru.Len())
+	}
+}

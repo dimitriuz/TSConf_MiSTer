@@ -30,4 +30,6 @@ This is a local clone of MiSTer-devel/TSConf_MiSTer (upstream head `1f61dc5`, 20
 
 ## Related
 
+- **`~/repo/MiSTer_docs`**: practical notes for every agent: board access and rules, remote control of the OSD (Companion Remote daemon), screenshots/capture feed, sharing/FUSE findings, Quartus builds. Read `README.md` there before any board work, and update it when you learn something.
+
 - `~/repo/MiSTer_pico-speccy`: the PicoSpeccy hybrid core. Its `docs/ideas/2026-11-04-shared-folders.md` (branch `ideas`) has the parked "folder as disk in Main_MiSTer" idea, for which a second SD image slot is the natural attach point later.

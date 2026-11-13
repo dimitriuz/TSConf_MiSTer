@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,9 +159,17 @@ func needTool(t *testing.T, names ...string) {
 	}
 }
 
+var (
+	fsckVersionRe = regexp.MustCompile(`^fsck\.fat \d+\.\d+(\.\d+)? \(\d{4}-\d{2}-\d{2}\)$`)
+	fsckSummaryRe = regexp.MustCompile(`^\S+: (\d+) files, (\d+)/(\d+) clusters$`)
+)
+
 // fsck runs fsck.vfat -n on the partition of the dumped disk (extracted with
-// dd, since fsck.vfat has no --offset) and fails on any non-zero exit. It
-// returns fsck's output.
+// dd, since fsck.vfat has no --offset). It fails on a non-zero exit, on any
+// output line other than the version banner and the summary line
+// "N files, M/K clusters", and when the summary disagrees with the volume:
+// N = files + directories, M = clusters in use, K = clusters in the data
+// area. It returns fsck's output.
 func fsck(t *testing.T, img string, v *Volume) string {
 	t.Helper()
 	needTool(t, "fsck.vfat", "dd")
@@ -173,6 +183,26 @@ func fsck(t *testing.T, img string, v *Volume) string {
 	os.Remove(part)
 	if err != nil {
 		t.Fatalf("fsck.vfat -n failed: %v\n%s", err, out)
+	}
+	var sum []string
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		switch {
+		case fsckVersionRe.MatchString(l):
+		case fsckSummaryRe.MatchString(l):
+			sum = fsckSummaryRe.FindStringSubmatch(l)
+		default:
+			t.Fatalf("unexpected fsck.vfat output line %q in:\n%s", l, out)
+		}
+	}
+	if sum == nil {
+		t.Fatalf("no \"N files, M/K clusters\" line in fsck output:\n%s", out)
+	}
+	n, _ := strconv.Atoi(sum[1])
+	m, _ := strconv.Atoi(sum[2])
+	k, _ := strconv.Atoi(sum[3])
+	if n != len(v.files)+len(v.dirs) || m != int(v.usedEnd)-2 || k != int(v.totalClusters) {
+		t.Errorf("fsck summary %q; volume has %d files + %d dirs, %d clusters used of %d",
+			sum[0], len(v.files), len(v.dirs), int(v.usedEnd)-2, v.totalClusters)
 	}
 	return string(out)
 }

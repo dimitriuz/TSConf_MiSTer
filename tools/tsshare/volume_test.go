@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path"
 	"runtime"
 	"sort"
 	"strings"
@@ -420,5 +421,242 @@ func TestGeometry(t *testing.T) {
 	g := v.Geometry()
 	if g.Files != 1 || g.Dirs != 2 || g.DiskBytes != v.Size() || g.PartStart != 128 || g.SectorsPerCluster == 0 {
 		t.Fatalf("geometry %+v", g)
+	}
+}
+
+// A tree of one root-level file whose cluster count at 4 KiB clusters, plus
+// the root directory's single cluster, is exactly total.
+func TestClusterCountBoundary4K(t *testing.T) {
+	for _, c := range []struct {
+		total    int64 // clusters of 4 KiB the content needs (root dir + file)
+		spc      int
+		clusters uint32
+	}{
+		// 65,524 clusters is one short of FAT32's minimum: 2 KiB clusters
+		// are chosen and the file needs twice as many of them.
+		{65524, 4, 2*(65524-1) + 1},
+		{65525, 8, 65525},
+		{65526, 8, 65526},
+	} {
+		src := newMemSource(map[string]memFile{"big.bin": {Size: (c.total - 1) * 4096, ModTime: t0}})
+		v, _, err := NewVolume(src, VolumeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.spc != c.spc || v.totalClusters != c.clusters {
+			t.Errorf("content of %d 4K clusters: spc=%d clusters=%d, want spc=%d clusters=%d",
+				c.total, v.spc, v.totalClusters, c.spc, c.clusters)
+		}
+		if v.usedEnd != uint32(2+int64(c.clusters)) && c.total != 65524 {
+			t.Errorf("usedEnd %d", v.usedEnd)
+		}
+	}
+	// One byte more than 65,525 clusters rolls the file into another cluster.
+	src := newMemSource(map[string]memFile{"big.bin": {Size: 65524*4096 + 1, ModTime: t0}})
+	v, _, err := NewVolume(src, VolumeOptions{})
+	if err != nil || v.spc != 8 || v.totalClusters != 65526 {
+		t.Errorf("65525 clusters + 1 byte: %v spc=%d clusters=%d", err, v.spc, v.totalClusters)
+	}
+}
+
+// listing of a directory image under the root, as a set of names
+func nameSet(l []string) map[string]bool {
+	m := map[string]bool{}
+	for _, n := range l {
+		m[n] = true
+	}
+	return m
+}
+
+// Directories whose entries end exactly at a cluster boundary (no end marker
+// fits) and one entry beyond it. Names are upper-case 8.3, so each takes one
+// entry.
+func TestDirectoryClusterBoundary(t *testing.T) {
+	needTool(t, "fsck.vfat", "mdir", "dd")
+	for _, spc := range []int{1, 2} {
+		perCluster := 16 * spc // 32-byte entries per cluster
+		for _, extra := range []int{-1, 0, 1} {
+			// The directory holds `perCluster+extra` entries: the root has the
+			// label and the subdirectory "DIR" besides its k files; "DIR" has "."
+			// and ".." besides its k files. All names are short (no LFN entries).
+			k := perCluster - 2 + extra
+			for _, root := range []bool{false, true} {
+				prefix := "DIR/"
+				if root {
+					prefix = ""
+				}
+				files := map[string]memFile{}
+				want := map[string]bool{"DIR/": true}
+				for i := 0; i < k; i++ {
+					n := fmt.Sprintf("F%03d.TXT", i)
+					files[prefix+n] = memFile{Size: int64(10 + i), ModTime: t0}
+					want[prefix+n] = true
+				}
+				if root {
+					files["DIR/X.TXT"] = memFile{Size: 1, ModTime: t0} // "DIR" exists in both variants
+					want["DIR/X.TXT"] = true
+				}
+				v, w, err := NewVolume(newMemSource(files), VolumeOptions{SectorsPerCluster: spc})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(w) != 0 {
+					t.Errorf("warnings: %q", w)
+				}
+				name := fmt.Sprintf("spc=%d root=%v entries=%d", spc, root, perCluster+extra)
+				idx := 1 // "DIR"
+				if root {
+					idx = 0
+				}
+				wantClusters := (perCluster + extra + perCluster - 1) / perCluster
+				if got := int(v.dirs[idx].count); got != wantClusters {
+					t.Errorf("%s: directory has %d clusters, want %d", name, got, wantClusters)
+				}
+				img := dumpVolume(t, v)
+				fsck(t, img, v)
+				got := nameSet(mdirList(t, img))
+				if len(got) != len(want) {
+					t.Errorf("%s: listed %d names, want %d", name, len(got), len(want))
+				}
+				for n := range want {
+					if !got[n] {
+						t.Errorf("%s: %s missing from listing", name, n)
+					}
+				}
+			}
+		}
+	}
+}
+
+// A file whose size is a whole number of clusters, and one byte more or less.
+func TestFileClusterBoundary(t *testing.T) {
+	needTool(t, "fsck.vfat", "mcopy", "dd")
+	for _, spc := range []int{1, 2} {
+		cb := int64(spc) * 512
+		files := map[string]memFile{}
+		for _, sz := range []int64{cb - 1, cb, cb + 1, 3 * cb, 3*cb + 1, 8*cb - 1, 8 * cb} {
+			files[fmt.Sprintf("S%d.BIN", sz)] = memFile{Size: sz, ModTime: t0}
+		}
+		src := newMemSource(files)
+		v, _, err := NewVolume(src, VolumeOptions{SectorsPerCluster: spc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		img := dumpVolume(t, v)
+		fsck(t, img, v)
+		for _, f := range v.files {
+			p := src.paths[f.node.ID]
+			wantClusters := uint32((int64(f.size) + cb - 1) / cb)
+			if f.count != wantClusters {
+				t.Errorf("spc=%d %s: %d clusters, want %d", spc, p, f.count, wantClusters)
+			}
+			b := mcopyOut(t, img, "::"+p)
+			if int64(len(b)) != int64(f.size) || !bytes.Equal(b, src.expected(p, 0, len(b))) {
+				t.Errorf("spc=%d %s: mcopy gave %d bytes (want %d) or wrong contents", spc, p, len(b), f.size)
+			}
+		}
+	}
+}
+
+// rootEntry returns the 32-byte short directory entry of a file in the root.
+func rootEntry(t *testing.T, v *Volume, short string) []byte {
+	t.Helper()
+	dir := readAll(t, v, (v.partStart+v.dataStart)*sectorSize, int(v.dirs[0].count)*v.spc*sectorSize)
+	want := []byte(fmt.Sprintf("%-8s%-3s", strings.TrimSuffix(short, path.Ext(short)), strings.TrimPrefix(path.Ext(short), ".")))
+	for off := 0; off+32 <= len(dir); off += 32 {
+		if dir[off+11] != 0x0F && bytes.Equal(dir[off:off+11], want) {
+			return dir[off : off+32]
+		}
+	}
+	t.Fatalf("no root entry %q", short)
+	return nil
+}
+
+func TestFATTimestamps(t *testing.T) {
+	cases := []struct {
+		name       string
+		mod        time.Time
+		y, mo, d   int
+		h, mi, sec int
+	}{
+		{"E1975.TXT", time.Date(1975, 1, 1, 0, 0, 0, 0, time.UTC), 1980, 1, 1, 0, 0, 0},
+		{"E1979.TXT", time.Date(1979, 12, 31, 23, 59, 59, 0, time.UTC), 1980, 1, 1, 0, 0, 0},
+		{"E1980.TXT", time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC), 1980, 1, 1, 0, 0, 0},
+		{"E1980B.TXT", time.Date(1980, 1, 1, 0, 0, 1, 0, time.UTC), 1980, 1, 1, 0, 0, 0},
+		{"E2108.TXT", time.Date(2108, 5, 5, 12, 0, 0, 0, time.UTC), 2107, 12, 31, 23, 59, 58},
+		{"E2107.TXT", time.Date(2107, 12, 31, 23, 59, 59, 0, time.UTC), 2107, 12, 31, 23, 59, 58},
+		{"ODD.TXT", time.Date(2020, 5, 17, 13, 45, 31, 0, time.UTC), 2020, 5, 17, 13, 45, 30},
+		{"EVEN.TXT", time.Date(2020, 5, 17, 13, 45, 30, 0, time.UTC), 2020, 5, 17, 13, 45, 30},
+		{"SEC59.TXT", time.Date(2001, 2, 3, 4, 5, 59, 0, time.UTC), 2001, 2, 3, 4, 5, 58},
+		{"ZERO.TXT", time.Time{}, 1980, 1, 1, 0, 0, 0},
+	}
+	files := map[string]memFile{}
+	for _, c := range cases {
+		files[c.name] = memFile{Size: 5, ModTime: c.mod}
+	}
+	v, w, err := NewVolume(newMemSource(files), VolumeOptions{})
+	if err != nil || len(w) != 0 {
+		t.Fatalf("%v %q", err, w)
+	}
+	le := binary.LittleEndian
+	for _, c := range cases {
+		e := rootEntry(t, v, c.name)
+		// created (16 date, 14 time), accessed (18, date only) and modified
+		// (24 date, 22 time) must all carry the expected stamp
+		for _, off := range []int{16, 18, 24} {
+			date := le.Uint16(e[off:])
+			if y, mo, d := int(date>>9)+1980, int(date>>5&15), int(date&31); y != c.y || mo != c.mo || d != c.d {
+				t.Errorf("%s date at %d: %d-%02d-%02d, want %d-%02d-%02d", c.name, off, y, mo, d, c.y, c.mo, c.d)
+			}
+		}
+		for _, off := range []int{14, 22} {
+			tm := le.Uint16(e[off:])
+			if h, mi, sec := int(tm>>11), int(tm>>5&63), int(tm&31)*2; h != c.h || mi != c.mi || sec != c.sec {
+				t.Errorf("%s time at %d: %02d:%02d:%02d, want %02d:%02d:%02d", c.name, off, h, mi, sec, c.h, c.mi, c.sec)
+			}
+		}
+	}
+}
+
+// A subdirectory over the 65,536-entry limit keeps what fits ("." and ".."
+// take two entries) and warns with its path; the volume stays consistent.
+func TestSubdirectoryLimit(t *testing.T) {
+	needTool(t, "fsck.vfat", "mdir", "dd")
+	files := map[string]memFile{"top.txt": {Size: 3, ModTime: t0}}
+	for i := 0; i < 70000; i++ {
+		files[fmt.Sprintf("sub/F%07d.TXT", i)] = memFile{ModTime: t0}
+	}
+	files["sub/z/inner.txt"] = memFile{Size: 5, ModTime: t0} // sorts after F..., so it is dropped
+	v, w, err := NewVolume(newMemSource(files), VolumeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limit []string
+	for _, s := range w {
+		if strings.Contains(s, "limit") {
+			limit = append(limit, s)
+		}
+	}
+	if len(limit) != 1 || !strings.Contains(limit[0], "/sub") || !strings.Contains(limit[0], "4467") {
+		t.Errorf("limit warnings: %q (want one for /sub dropping 4467 entries)", limit)
+	}
+	img := dumpVolume(t, v)
+	fsck(t, img, v)
+	names := mdirList(t, img)
+	// top.txt, sub, and 65,534 children of sub
+	if len(names) != 2+65534 {
+		t.Errorf("listed %d entries, want %d", len(names), 2+65534)
+	}
+	sub := 0
+	for _, n := range names {
+		if strings.HasPrefix(n, "sub/") && n != "sub/" {
+			sub++
+			if strings.HasPrefix(n, "sub/z") {
+				t.Errorf("%s should have been dropped", n)
+			}
+		}
+	}
+	if sub != 65534 {
+		t.Errorf("sub has %d children, want 65534", sub)
 	}
 }

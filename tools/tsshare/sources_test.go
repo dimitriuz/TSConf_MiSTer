@@ -830,9 +830,12 @@ func TestCacheRecycleSafe(t *testing.T) {
 	c := s.(*zipSource).cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.free) == 0 {
+	// The free list may legitimately be empty at the end (it holds at most
+	// 4 blocks with a 1 MB cache), so count recycle events instead.
+	if c.recycled == 0 {
 		t.Error("no buffer was recycled")
 	}
+	t.Logf("recycled %d blocks, reused %d", c.recycled, c.reused)
 	if int64(len(c.free))*blockSize > c.freeMax || c.total > c.budget {
 		t.Errorf("free %d blocks (max %d bytes), total %d (budget %d)", len(c.free), c.freeMax, c.total, c.budget)
 	}

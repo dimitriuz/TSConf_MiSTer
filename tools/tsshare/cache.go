@@ -212,6 +212,8 @@ type byteCache struct {
 	lru       *list.List
 	free      [][]byte
 	freeMax   int64
+	recycled  int64 // blocks put on the free list (statistics)
+	reused    int64 // blocks taken from the free list (statistics)
 }
 
 func newByteCache(budget int64) *byteCache {
@@ -230,6 +232,7 @@ func (c *byteCache) alloc(n int) *cdata {
 		if k := len(c.free); k > 0 {
 			d.blk[i] = c.free[k-1]
 			c.free = c.free[:k-1]
+			c.reused++
 		}
 	}
 	c.mu.Unlock()
@@ -254,6 +257,7 @@ func (c *byteCache) recycleLocked(d *cdata) {
 			break // over the bound: leave the rest to the GC
 		}
 		c.free = append(c.free, b)
+		c.recycled++
 	}
 	d.blk = nil
 }

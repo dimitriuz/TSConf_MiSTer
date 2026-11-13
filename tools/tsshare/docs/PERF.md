@@ -15,11 +15,11 @@ Peak RSS is `VmHWM` from `/proc/<pid>/status` (there is no `/usr/bin/time`).
 | SD.zip start-up (scan + volume build, then `share.vhd` visible) | 0.42 s cold page cache, 0.35 s warm; "built in" 398 / 327 ms |
 | SD.zip warnings | none (0) |
 | SD.zip geometry | 57,353 files, 1,034 dirs (incl. root), 8 sectors/cluster, 912,542 clusters, 7,130 FAT sectors, partition at sector 128 (7,314,628 sectors), disk 3,745,513,472 bytes |
-| Peak RSS, SD.zip, default 64 MB cache | 58 MB after the scan, 135 MB after one full sequential read, 145.5 MB at exit after a whole verification session (see "Memory") |
+| Peak RSS, SD.zip, default **32 MB** cache (`-mem-limit-mb 192`) | 58 MB after the scan, 100 MB after one full sequential read, 105 MB at exit after a verification session. With the former 64 MB default: 58 / 135 / 145.5 MB (see section 2 and 4) |
 | `fsck.vfat -n` on SD.zip partition | clean, exit 0: `58387 files, 912542/912542 clusters` |
 | Content check against the zip | all 57,353 entries equal (md5, Python `zipfile` as the independent reader); includes 300 random, the 20 largest, all 29 non-ASCII names |
-| Warm 16 KB read | server-side median 1-2 us, p99 10-13 us; client-side (through FUSE) median 14-18 us, p99 51-117 us, max 0.84 ms |
-| Cold whole 3 MB read from the NAS-backed zip | 17-39 ms (worst, a 4.0 MB entry with 2.5 MB deflated: 97 ms) against a bar of 10 s |
+| Warm 16 KB read | server-side median 0-2 us, p99 3-13 us; client-side (through FUSE) median 13-18 us, p99 35-117 us, max 0.84 ms (while the working set fits the cache; see section 3 for 32 MB) |
+| Cold whole 3 MB read from the NAS-backed zip | 6-41 ms for the 20 largest distinct files (2.9-3.5 MB: 16-36 ms; worst, the 4.0 MB entry with 2.5 MB deflated: 41 ms in the final run, 97 ms in the first run) against a bar of 10 s |
 | Latency bars | met by a wide margin; no latency fix was needed |
 | ARM binary | 3.0 MB (`-trimpath -ldflags='-s -w'`), 4.6 MB unstripped |
 
@@ -102,6 +102,19 @@ zip all: 57353 checked, ok 57353, mismatch 0, not-found 0
 `mdir -i share.vhd@@65536 -/ -b ::` lists 58,386 names (57,353 files + 1,033
 directories), instantly.
 
+### Defaults changed to a 32 MB cache and a 192 MB heap limit
+
+By ruling (the board has 491 MB), the defaults are now `-cache-mb 32` (was 64) and
+`-mem-limit-mb 192` (was 256). Re-measured on SD.zip with the new defaults:
+
+| | 64 MB cache (before) | 32 MB cache (now) |
+| --- | --- | --- |
+| start-up, zip page cache evicted | 0.42 s ("built in" 398 ms) | 0.35 s ("built in" 322 ms) |
+| RSS after the scan (HWM / RSS) | 57.9 / 52 MB | 57.6 / 52.4 MB |
+| RSS HWM after `dd bs=128k` of the whole disk | 135 MB | 99.6 MB (22-23 s, 162 MB/s, daemon CPU 17.6 + 1.8 s) |
+| RSS HWM at exit after the checks | 145.5 MB | 104.6 MB |
+| fsck, content (all 57,353 entries, 300 random, 20 largest, 29 non-ASCII) | clean, all equal | all equal again |
+
 ## 3. Latency
 
 `tsshare -v -log lat.log`, SD.zip with its page cache evicted first. Tool:
@@ -111,23 +124,27 @@ daemon's read log by offset (server latency = time inside `vhdFile.Read`; client
 latency adds the kernel and FUSE round trip; "cold" = the first read of an
 entry's file, which inflates the whole entry, "warm" = any later read).
 
-Sequential: the 20 largest files (2-4.8 MB) in random order (seed 11), each read
-once in 16 KB chunks (cold) and straight again (warm); 3,640 reads per pass.
+Sequential: the 20 largest files with distinct (size, name) (`fatcheck.py seq` now
+skips copies of the same file in other directories; the first version of the run
+listed `pixeldemo.spg` three times and re-read some cached data), 1.5-4.8 MB, in
+random order (seed 11), each read once in 16 KB chunks (cold) and straight
+again (warm). Numbers below are from the final run with the 32 MB default (3,093
+reads per pass); the 64 MB first run, with the duplicates, is in brackets.
 
 | | median | p95 | p99 | max (us) |
 | --- | --- | --- | --- | --- |
-| cold, client | 15 | 36 | 85 | 91,947 |
-| cold, server (log) | 1 | 4 | 14 | 91,886 |
-| warm, client | 14 | 28 | 51 | 838 |
-| warm, server (log) | 1 | 5 | 10 | 47 |
+| cold, client | 15 (15) | 35 (36) | 69 (85) | 36,641 (91,947) |
+| cold, server (log) | 1 (1) | 2 (4) | 19 (14) | 36,586 (91,886) |
+| warm, client | 13 (14) | 24 (28) | 35 (51) | 400 (838) |
+| warm, server (log) | 0 (1) | 1 (5) | 3 (10) | 37 (47) |
 
-Each cold file's single slow request is its first read; the rest of its chunks
-run at warm speed. Whole-file wall time, cold: Ygor (3.44 MB) 24 ms,
-demorama_TS.spg (3.24 MB) 39 ms, mindwarp.spg (2.23 MB) 26 ms, XX S - Sword of
-Darkness (4.79 MB) 28-30 ms, ts_frac3.spg (4.00 MB, 2.5 MB deflated) 97 ms, the
-rest 12-30 ms; warm: 2-6 ms. The largest compressed entry is 2.5 MB, and all
-stored entries are under 8 KB, so the NFS-heavy cases are covered. **A cold 3 MB read
-takes about 20-40 ms (bar: under about 10 s).**
+Each cold file's single slow request is its first read; the rest of its chunks run
+at warm speed. Whole-file wall time, cold: 6-41 ms for all 20 (3.2 MB
+demorama: 35-36 ms, 3.44 MB Ygor 21 ms, 4.79 MB Sword of Darkness 27 ms,
+4.0 MB ts_frac3.spg with 2.5 MB deflated 41 ms; the first run measured 97 ms for
+it); warm: 1-4 ms. The largest compressed entry is 2.5 MB and all stored entries
+are under 8 KB, so the NFS-heavy cases are covered. **A cold 3 MB read takes
+about 15-40 ms (bar: under about 10 s).**
 
 Random: 3,000 reads of 16 KB at random 512-byte-aligned offsets inside the extents
 of 300 random files (>= 16 KB), random file order (seed 5), 300 first touches:
@@ -139,9 +156,14 @@ of 300 random files (>= 16 KB), random file order (seed 5), 300 first touches:
 | warm, client | 18 | 51 | 117 | 711 |
 | warm, server | 2 | 7 | 13 | 91 |
 
-Warm reads are 2-3 orders of magnitude under the 1 ms bar; no latency fix was
-made. (The sequential cold maximum, 92 ms, includes the first-touch inflate of a
-4 MB entry.)
+With the 64 MB cache the warm reads were 2-3 orders of magnitude under the 1 ms bar.
+With the 32 MB default, the same run (300 files, 3,000 reads) gives cold median
+2,019 us, p95 8,448, p99 14,287, max 29,103 us, and "warm" median 36 us, p95 2,468,
+p99 4,181, max 5,762 us (server p99 4,129): the 300-file working set is larger than
+32 MB, so about 5-10% of the re-touches find their entry evicted and re-inflate it
+(2-6 ms), which is a cache miss, not a slow warm read. With a working set that fits
+(100 files, `rand ... 3000 100 5`): cold median 2,153 us, max 9,757 us; warm median
+14 us, p95 29, p99 45, max 77 us (server p99 7 us). No latency fix was made.
 
 ## 4. Fixes made (memory only)
 
@@ -170,8 +192,35 @@ GC tuning alone (GOGC 25: 192 MB; GOGC 50: 232 MB) did not fix it.
    for heap/CPU profiles without linking `net/http` into the release binary; and
    benchmarks (`perf_test.go`).
 
-Result: 135 MB after a full read (was 266 MB), 58 MB after the scan (was 89 MB),
+5. (Fix round 1) Accounting made honest: a pinned entry that is evicted keeps
+   counting (`deadBytes`) until its last reader releases it, eviction compares
+   `total+deadBytes` with the budget and always terminates (it stops when only the
+   newest entry is left), so memory is the budget plus the bytes pinned by in-flight
+   readers and the newest entry (comment in `cache.go`; `TestCacheBudgetPinned`
+   asserts it, and the cache's own `peak`, under `-race`). The previous version
+   decremented `total` at eviction and a stress run with a 4 MB budget peaked at
+   8.2 MB. `readStream` (entries larger than the cache budget) keeps a 256 KB
+   window and an open inflater per entry for the life of the daemon; SD.zip has
+   no such entry (largest 4.8 MB).
+6. (Fix round 1) Defaults lowered to a 32 MB cache and `-mem-limit-mb 192`.
+
+Result (at the first 64 MB default): 135 MB after a full read (was 266 MB), 58 MB after the scan (was 89 MB),
 throughput 170 MB/s (was 126 MB/s: less GC work).
+
+## 4b. The unexplained `go test -race` failure
+
+One `go test -race -count=1 .` run failed right after the first commit; its output
+was not captured, and it passed in 4 further race runs and 8 plain runs (and, for
+the reviewer, 5 runs under load of 433 s each). The most likely culprits are the
+tests with fixed timing: `TestSignalDuringBuild` (it slept a fixed 500 ms and
+then expected the signal handlers to be installed and the exit within 3 s, which
+under `-race` and a loaded machine can fail with the default SIGTERM action),
+and, less likely, the daemon shutdown tests that use 300 ms negative waits and
+`TestCacheLoadPanic` / `TestCacheLeaderFailureRetry` (100 ms for waiters to
+queue; a late waiter only weakens the test). `TestSignalDuringBuild` now waits for
+the daemon's `source:` line (printed after the handlers are installed and before
+the build delay) through a mutex-protected buffer and allows 10 s to cancel. The
+cause of the one failure remains unproven.
 
 ## 5. Board build and estimated ARM figures
 
@@ -217,7 +266,7 @@ go run ./scale ~/scratch/tree                      # 12 GiB sparse tree
 go build -o tsshare . && ./tsshare -src ~/scratch/tree -mount ~/scratch/mnt -log run.log   # add -v for read lines
 python3 -I scale/fatcheck.py tree ~/scratch/mnt/share.vhd ~/scratch/tree 5000 3
 python3 -I scale/fatcheck.py zip  ~/scratch/mnt/share.vhd SD.zip 300 7 20 all
-python3 -I scale/fatcheck.py seq  ~/scratch/mnt/share.vhd run.log 20 11
+python3 -I scale/fatcheck.py seq  ~/scratch/mnt/share.vhd run.log 20 11   # 20 distinct largest files
 python3 -I scale/fatcheck.py rand ~/scratch/mnt/share.vhd run.log 3000 300 5
 dd if=mnt/share.vhd of=part.img bs=1M iflag=skip_bytes,count_bytes skip=65536 count=$((SECTORS*512)); fsck.vfat -n part.img
 ```

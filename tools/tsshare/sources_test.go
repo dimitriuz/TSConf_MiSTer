@@ -840,3 +840,98 @@ func TestCacheRecycleSafe(t *testing.T) {
 		t.Errorf("map %d != lru %d", len(c.m), c.lru.Len())
 	}
 }
+
+// While readers hold pins, evicted entries stay allocated; the accounting
+// must count them (deadBytes) until the last release, and the cache's own
+// peak must stay within budget plus the newest entry.
+func TestCacheBudgetPinned(t *testing.T) {
+	const entry = 4 * blockSize // 64 KiB
+	const budget = 4 * entry
+	c := newByteCache(budget)
+	load := func(id int) func() (*cdata, error) {
+		return func() (*cdata, error) {
+			d := c.alloc(entry)
+			for i := range d.blk {
+				for j := range d.blk[i] {
+					d.blk[i][j] = byte(id)
+				}
+			}
+			return d, nil
+		}
+	}
+	check := func(when string) {
+		t.Helper()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		var live, dead int64
+		for _, e := range c.m {
+			if e.elem != nil {
+				live += e.data.size()
+			}
+		}
+		for e := range c.deadSet {
+			dead += e.data.size()
+		}
+		if c.total != live || c.deadBytes != dead {
+			t.Errorf("%s: total %d (live sum %d), deadBytes %d (dead-pinned sum %d)", when, c.total, live, c.deadBytes, dead)
+		}
+		if c.total+c.deadBytes > max(c.budget, c.deadBytes+entry) {
+			t.Errorf("%s: accounted %d exceeds max(budget, dead %d + entry)", when, c.total+c.deadBytes, c.deadBytes)
+		}
+	}
+	// pin entries 0..3 from goroutines that wait for release
+	hold := make(chan struct{})
+	var wg sync.WaitGroup
+	pinned := make(chan struct{}, 4)
+	for id := 0; id < 4; id++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			err := c.with(id, load(id), func(d *cdata) {
+				pinned <- struct{}{}
+				<-hold
+				if d.blk[0][0] != byte(id) || d.blk[len(d.blk)-1][100] != byte(id) {
+					t.Errorf("entry %d overwritten while pinned", id)
+				}
+			})
+			if err != nil {
+				t.Error(err)
+			}
+		}(id)
+	}
+	for i := 0; i < 4; i++ {
+		<-pinned
+	}
+	check("4 pinned")
+	// force many evictions: the four pinned entries are evicted first (oldest)
+	for id := 10; id < 40; id++ {
+		if err := c.with(id, load(id), func(d *cdata) {}); err != nil {
+			t.Fatal(err)
+		}
+		check(fmt.Sprintf("after load %d", id))
+	}
+	c.mu.Lock()
+	dead := c.deadBytes
+	c.mu.Unlock()
+	if dead != 0 && dead != 4*entry {
+		t.Errorf("deadBytes %d", dead)
+	}
+	close(hold)
+	wg.Wait()
+	check("after release")
+	c.mu.Lock()
+	if c.deadBytes != 0 || len(c.deadSet) != 0 {
+		t.Errorf("deadBytes %d after release", c.deadBytes)
+	}
+	if c.total > c.budget {
+		t.Errorf("total %d over budget", c.total)
+	}
+	// before eviction: budget + bytes pinned (4 entries) + the old and new entry
+	if c.peak > c.budget+4*entry+entry {
+		t.Errorf("peak %d > budget %d + pinned %d + entry %d", c.peak, c.budget, 4*entry, entry)
+	}
+	if c.peak < c.budget {
+		t.Errorf("peak %d never reached the budget: test is not exercising eviction", c.peak)
+	}
+	c.mu.Unlock()
+}

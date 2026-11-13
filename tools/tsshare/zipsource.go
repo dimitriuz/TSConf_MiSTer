@@ -295,7 +295,11 @@ func (s *zipSource) readStored(id int, zf *zip.File, p []byte, off int64) (int, 
 	return k, err
 }
 
-// zipStream inflates a big entry from the start through a sliding window.
+// zipStream inflates a big entry (one larger than the cache budget) from the
+// start through a sliding window. Each such entry keeps its 256 KB window and
+// its open inflater for the life of the daemon (streams is never trimmed), so
+// memory grows by that much per distinct huge entry read. No entry in the
+// owner's SD.zip (largest 4.8 MB) is that big.
 type zipStream struct {
 	mu     sync.Mutex
 	rc     io.ReadCloser

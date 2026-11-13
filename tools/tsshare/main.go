@@ -203,11 +203,11 @@ func main() {
 	src := flag.String("src", "", "directory or zip file to share (required)")
 	mnt := flag.String("mount", "", "mount point directory (required)")
 	label := flag.String("label", defaultLabel, "FAT volume label")
-	cacheMB := flag.Int("cache-mb", 64, "zip: MiB of inflated entries kept in memory")
+	cacheMB := flag.Int("cache-mb", 32, "zip: MiB of inflated entries kept in memory")
 	fdLimit := flag.Int("fd-limit", 64, "directory: open file descriptors kept")
 	logPath := flag.String("log", "", "log file for the read log and warnings (default: none)")
 	verbose := flag.Bool("v", false, "write one line per read to the -log file")
-	memMB := flag.Int("mem-limit-mb", 256, "soft Go heap limit in MiB (0 = off)")
+	memMB := flag.Int("mem-limit-mb", 192, "soft Go heap limit in MiB (0 = off)")
 	flag.Parse()
 	if *src == "" || *mnt == "" {
 		flag.Usage()

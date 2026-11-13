@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -347,19 +348,26 @@ func TestSignalDuringBuild(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, daemonBin, "-src", makeTree(t), "-mount", mnt)
 			cmd.Env = append(os.Environ(), "TSSHARE_TEST_BUILD_DELAY=20s")
-			var se bytes.Buffer
+			var se syncBuf
 			cmd.Stderr = &se
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			time.Sleep(500 * time.Millisecond) // inside the build delay
+			// "source:" is printed after the signal handlers are installed and
+			// before the build delay, so the signal arrives inside the delay
+			// however loaded the machine is.
+			for dl := time.Now().Add(20 * time.Second); !strings.Contains(se.String(), "source:"); time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(dl) {
+					t.Fatalf("daemon never reached the build\n%s", se.String())
+				}
+			}
 			start := time.Now()
 			cmd.Process.Signal(tc.sig)
 			err := cmd.Wait()
 			if c := exitCode(err); c != tc.want {
 				t.Fatalf("exit %d, want %d\n%s", c, tc.want, se.String())
 			}
-			if time.Since(start) > 3*time.Second {
+			if time.Since(start) > 10*time.Second {
 				t.Errorf("took %v to cancel", time.Since(start))
 			}
 			if isMounted(mnt) {
@@ -441,4 +449,23 @@ func TestBadSource(t *testing.T) {
 			}
 		})
 	}
+}
+
+// syncBuf is a bytes.Buffer safe for the exec copier goroutine and a polling
+// reader.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

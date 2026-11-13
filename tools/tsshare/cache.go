@@ -9,13 +9,13 @@ import (
 
 // SourceOptions tunes the directory and zip sources.
 type SourceOptions struct {
-	CacheMB int // zip: total size of inflated entries kept in memory (default 64)
+	CacheMB int // zip: total size of inflated entries kept in memory (default 32)
 	FDLimit int // directory: open descriptors kept (default 64)
 }
 
 func (o SourceOptions) withDefaults() SourceOptions {
 	if o.CacheMB <= 0 {
-		o.CacheMB = 64
+		o.CacheMB = 32
 	}
 	if o.FDLimit <= 0 {
 		o.FDLimit = 64
@@ -180,9 +180,20 @@ type zentry struct {
 	shared bool // data escaped through get(): never recycle
 }
 
-// byteCache is an LRU of inflated entries bounded by total bytes (of blocks,
-// so the bound is real memory), with one load per entry at a time
-// (singleflight).
+// byteCache is an LRU of inflated entries bounded by total bytes (of blocks),
+// with one load per entry at a time (singleflight).
+//
+// Accounting: total counts the entries in the LRU, deadBytes the entries that
+// were evicted while a reader still held them (their blocks stay allocated
+// until the last release). Eviction runs while total+deadBytes exceeds the
+// budget and stops when only the newest entry is left (pinned entries cannot
+// be freed, so it always terminates). Hence after a load, the cache holds at
+// most the budget, except that it can exceed it by the bytes pinned by
+// in-flight readers plus the newest entry; transiently, while the load is
+// being added, by one more entry. The free list (freeMax) and blocks of loads
+// still in flight come on top. Evicting live entries to make up for pinned
+// ones can cost hit rate while readers are busy; that is the price of an
+// honest bound.
 //
 // Entries live in 16 KiB blocks and the blocks of evicted entries are
 // recycled through a free list bounded by freeMax, so reading a large archive
@@ -190,18 +201,21 @@ type zentry struct {
 // let the Go heap grow to about twice the cache: see docs/PERF.md). Data
 // handed out by with() is pinned and recycled only after the last reader.
 type byteCache struct {
-	mu      sync.Mutex
-	budget  int64
-	total   int64
-	peak    int64 // highest total seen, before eviction
-	m       map[int]*zentry
-	lru     *list.List
-	free    [][]byte
-	freeMax int64
+	mu     sync.Mutex
+	budget int64
+	total  int64
+	peak   int64 // highest total+deadBytes seen, before eviction
+	// deadBytes: bytes of evicted entries still pinned by readers.
+	deadBytes int64
+	deadSet   map[*zentry]struct{} // the dead entries themselves (for checks)
+	m         map[int]*zentry
+	lru       *list.List
+	free      [][]byte
+	freeMax   int64
 }
 
 func newByteCache(budget int64) *byteCache {
-	return &byteCache{budget: budget, m: map[int]*zentry{}, lru: list.New(),
+	return &byteCache{budget: budget, m: map[int]*zentry{}, lru: list.New(), deadSet: map[*zentry]struct{}{},
 		freeMax: min(budget/16, 4<<20)}
 }
 
@@ -296,10 +310,10 @@ func (c *byteCache) acquire(id int, pin bool, load func() (*cdata, error)) (*zen
 	} else {
 		e.elem = c.lru.PushFront(e)
 		c.total += data.size()
-		if c.total > c.peak {
-			c.peak = c.total
+		if c.total+c.deadBytes > c.peak {
+			c.peak = c.total + c.deadBytes
 		}
-		for c.total > c.budget && c.lru.Len() > 1 {
+		for c.total+c.deadBytes > c.budget && c.lru.Len() > 1 {
 			el := c.lru.Back()
 			v := el.Value.(*zentry)
 			c.lru.Remove(el)
@@ -309,6 +323,8 @@ func (c *byteCache) acquire(id int, pin bool, load func() (*cdata, error)) (*zen
 			case v.shared:
 			case v.pins > 0:
 				v.dead = true
+				c.deadBytes += v.data.size()
+				c.deadSet[v] = struct{}{}
 			default:
 				c.recycleLocked(v.data)
 			}
@@ -330,6 +346,8 @@ func (c *byteCache) release(e *zentry, pinned bool) {
 	c.mu.Lock()
 	e.pins--
 	if e.pins == 0 && e.dead {
+		c.deadBytes -= e.data.size()
+		delete(c.deadSet, e)
 		c.recycleLocked(e.data)
 		e.dead = false
 	}

@@ -226,7 +226,15 @@ def main():
                 names = [l.rstrip('\n') for l in open(sys.argv[6])]
                 big = [(n, files[n]) for n in names]
             else:
-                big = sorted(files.items(), key=lambda kv: -kv[1][0])[:topn]
+                # the largest files, one per distinct (size, base name): copies of the
+                # same file in other directories would re-read cached data
+                big, seen = [], set()
+                for kv in sorted(files.items(), key=lambda kv: (-kv[1][0], kv[0])):
+                    k = (kv[1][0], kv[0].rsplit('/', 1)[-1].lower())
+                    if k not in seen:
+                        seen.add(k)
+                        big.append(kv)
+                big = big[:topn]
             random.Random(seed).shuffle(big)
             print('file order:', [b[0].rsplit('/', 1)[-1][:30] + ' ' + str(b[1][0]) for b in big][:5], '...')
             for path, (size, start, d, t) in big:

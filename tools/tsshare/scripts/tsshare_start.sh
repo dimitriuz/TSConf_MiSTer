@@ -6,13 +6,15 @@
 # Then, in the TSConf OSD: Mount SD2 image -> share -> <name>.vhd.
 # MODE=single: one folder or zip as share.vhd in $MOUNT.
 # Usage: tsshare_start.sh [zip-root-folder]    (single: [folder-or-zip])
+# The argument replaces ZIPROOT (view) or SRC (single). SHARED defaults to
+# $ZIPROOT/shared, after that replacement. Paths must be absolute.
 # Touches only $MOUNT and $SHARED (view mode creates them) and the
 # files in $CONF_DIR.
 
 # ---- settings (edit here, or override with environment variables) ----
 MODE="${MODE:-view}"
 ZIPROOT="${ZIPROOT:-/media/fat/games/TSConf}"
-SHARED="${SHARED:-/media/fat/games/TSConf/shared}"
+# SHARED: default $ZIPROOT/shared (set below, once ZIPROOT is final)
 SRC="${SRC:-/media/fat/games/Spectrum/compilations/AAA/SD.zip}"
 # MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare
 CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
@@ -36,11 +38,14 @@ view | single) ;;
 	exit 1
 	;;
 esac
+ALT=
 if [ -z "$MOUNT" ]; then
 	if [ "$MODE" = view ]; then
 		MOUNT=/media/fat/games/TSConf/share
+		ALT=/media/fat/tsshare
 	else
 		MOUNT=/media/fat/tsshare
+		ALT=/media/fat/games/TSConf/share
 	fi
 fi
 # ---- END defaults ----
@@ -64,12 +69,34 @@ fi
 
 die() {
 	echo "ERROR: $1"
-	[ -n "$2" ] && echo "  $2"
+	[ -n "$2" ] && echo "  $(short "$2")"
 	exit 1
 }
 
+# $1 without trailing slashes ("/" and empty stay as they are)
+norm() {
+	_n="$1"
+	while [ "${_n%/}" != "$_n" ] && [ -n "${_n%/}" ]; do
+		_n="${_n%/}"
+	done
+	echo "$_n"
+}
+
+need_abs() { # need_abs NAME VALUE
+	case "$2" in
+	/*) ;;
+	*) die "$1 must be an absolute path:" "$2" ;;
+	esac
+}
+
 # ---- BEGIN lib (identical in start and stop; test_scripts.sh diffs it) ----
-# MOUNTS_FILE is a test hook (a sample /proc/mounts).
+# MOUNTS_FILE is a test hook (a sample /proc/mounts); SCAN_PREFIX is
+# another (scan_any only looks at processes whose argv[0] starts with it).
+
+# a path for a message of at most 60 columns: the last 52 characters
+short() {
+	printf '%s\n' "$1" | sed 's/.*\(.\{52\}\)$/...\1/'
+}
 
 # $1 as it appears in /proc/mounts (octal escapes for \, space, tab)
 esc() {
@@ -120,7 +147,7 @@ is_ours() {
 	esac
 	[ "$_p" != "$$" ] && [ "$_p" != "$PPID" ] || return 1
 	alive "$_p" || return 1
-	tr '\0' '\n' < "/proc/$_p/cmdline" 2>/dev/null | {
+	tr '\0' '\n' 2>/dev/null < "/proc/$_p/cmdline" | {
 		IFS= read -r _a0 || exit 1
 		[ "${_a0##*/}" = tsshare ] || exit 1
 		_prev=
@@ -143,6 +170,47 @@ scan_pid() {
 	done
 	return 1
 }
+# the "-mount" value of a live process whose argv[0] basename is
+# tsshare (not this shell or its parent); empty if there is none
+ts_mount() {
+	_p="$1"
+	case "$_p" in
+	"" | *[!0-9]*) return 1 ;;
+	esac
+	[ "$_p" != "$$" ] && [ "$_p" != "$PPID" ] || return 1
+	alive "$_p" || return 1
+	tr '\0' '\n' 2>/dev/null < "/proc/$_p/cmdline" | {
+		IFS= read -r _a0 || exit 1
+		[ "${_a0##*/}" = tsshare ] || exit 1
+		_prev=
+		while IFS= read -r _a; do
+			if [ "$_prev" = -mount ] && [ -n "$_a" ]; then
+				echo "$_a"
+				exit 0
+			fi
+			_prev="$_a"
+		done
+		exit 1
+	}
+}
+
+# first process that is a tsshare daemon whatever its mount point
+# (scans /proc: a plain ps only lists some processes on some systems)
+scan_any() {
+	for _c in $(grep -l tsshare /proc/[0-9]*/cmdline 2>/dev/null |
+		sed 's|^/proc/\([0-9]*\)/cmdline$|\1|'); do
+		_a0="$(tr '\0' '\n' 2>/dev/null < "/proc/$_c/cmdline" | head -n 1)"
+		case "$_a0" in
+		"$SCAN_PREFIX"*) ;;
+		*) continue ;;
+		esac
+		if [ -n "$(ts_mount "$_c")" ]; then
+			echo "$_c"
+			return 0
+		fi
+	done
+	return 1
+}
 # ---- END lib ----
 
 # serving: in view mode also require our own mount, not just the file
@@ -152,20 +220,48 @@ ready() {
 	return 0
 }
 
+# the last log lines without the prefix; a line over 60 columns is shown
+# as its first 60 columns, then columns 61-120, or, if it is longer, the
+# last 57 columns after "...", so the end of a long message is visible
 show_log() {
-	[ -f "$LOG" ] && tail -n 4 "$LOG" | cut -c1-60
+	[ -f "$LOG" ] || return 0
+	tail -n 3 "$LOG" |
+		sed 's/^tsshare: \([0-9][0-9]:[0-9:.]* \)\{0,1\}//' |
+		while IFS= read -r _l; do
+			printf '%s\n' "$_l" | cut -c1-60
+			if [ "${#_l}" -gt 120 ]; then
+				printf '%s\n' "$_l" | sed 's/.*\(.\{57\}\)$/...\1/'
+			elif [ "${#_l}" -gt 60 ]; then
+				printf '%s\n' "$_l" | cut -c61-120
+			fi
+		done
 }
 
 [ "${BIN##*/}" = tsshare ] || die "BIN must be named tsshare:" "$BIN"
 [ -f "$BIN" ] || die "no daemon at" "$BIN"
 [ -x "$BIN" ] || die "not executable (chmod +x):" "$BIN"
+need_abs MOUNT "$MOUNT"
 if [ "$MODE" = view ]; then
+	ZIPROOT="$(norm "$ZIPROOT")"
+	SHARED="$(norm "${SHARED:-$ZIPROOT/shared}")"
+	need_abs ZIPROOT "$ZIPROOT"
+	need_abs SHARED "$SHARED"
+	[ "$ZIPROOT" != / ] || die "ZIPROOT must not be /"
+	[ "$SHARED" != / ] || die "SHARED must not be /"
 	[ -d "$ZIPROOT" ] || die "folder not found:" "$ZIPROOT"
-	# textual check only; the daemon resolves paths and has the last word
+	# textual checks, before anything is created; the daemon resolves
+	# symlinks and has the last word
 	case "$MOUNT/" in
 	"$SHARED"/*) die "MOUNT must not be inside SHARED:" "$MOUNT" ;;
 	esac
+	case "$SHARED/" in
+	"$MOUNT"/*) die "SHARED must not be inside MOUNT:" "$SHARED" ;;
+	esac
+	case "$ZIPROOT/" in
+	"$MOUNT"/*) die "ZIPROOT must not be inside MOUNT:" "$ZIPROOT" ;;
+	esac
 else
+	SRC="$(norm "$SRC")"
 	[ -e "$SRC" ] || die "source not found:" "$SRC"
 fi
 
@@ -175,7 +271,8 @@ if [ "$MODE" = view ]; then READY=shared.vhd; else READY=share.vhd; fi
 # one instance only
 if [ -f "$PIDFILE" ]; then
 	OLD="$(cat "$PIDFILE" 2>/dev/null)"
-	if is_ours "$OLD"; then
+	# a live tsshare, whatever its mount point, is never called stale
+	if [ -n "$(ts_mount "$OLD")" ]; then
 		echo "tsshare is already running (pid $OLD)."
 		echo "Run tsshare_stop.sh first to change the source."
 		exit 1
@@ -183,7 +280,7 @@ if [ -f "$PIDFILE" ]; then
 	echo "Removed stale pid file (pid $OLD is not tsshare)."
 	rm -f "$PIDFILE"
 fi
-OLD="$(scan_pid)"
+OLD="$(scan_any)"
 if [ -n "$OLD" ]; then
 	echo "tsshare is already running (pid $OLD)."
 	echo "Run tsshare_stop.sh first."
@@ -206,6 +303,9 @@ if [ -d /sys/fs/fuse/connections ] && \
 	mount -t fusectl none /sys/fs/fuse/connections 2>/dev/null
 fi
 
+if [ -d "$MOUNT" ] && [ -n "$(ls -A "$MOUNT" 2>/dev/null)" ]; then
+	echo "Note: files in MOUNT are hidden while mounted" | cut -c1-60
+fi
 if [ "$MODE" = view ] && [ ! -d "$SHARED" ]; then
 	mkdir -p "$SHARED" || die "cannot create" "$SHARED"
 	echo "Created folder: ${SHARED##*/}" | cut -c1-60
@@ -217,7 +317,7 @@ fi
 mkdir -p "$MOUNT" || die "cannot create" "$MOUNT"
 mkdir -p "$CONF_DIR" || die "cannot create" "$CONF_DIR"
 # without a log file the daemon would never start: say why (read-only or full SD card?)
-( : > "$LOG" ) 2>/dev/null || die "cannot create the log file (read-only or full SD card?)" "$LOG"
+( : > "$LOG" ) 2>/dev/null || die "cannot write the log (SD full/read-only?)" "$LOG"
 
 if [ "$MODE" = view ]; then
 	echo "Viewing: ${ZIPROOT##*/}" | cut -c1-60
@@ -266,7 +366,7 @@ if [ "$MODE" = view ]; then
 	echo "View ready: pick in the OSD (${i}s, pid $PID)"
 	echo "Mount SD2 image -> ${MOUNT##*/} ->" | cut -c1-60
 	echo "  <name>.vhd or shared.vhd"
-	echo "Log: $LOG"
+	echo "Log: $(short "$LOG")"
 	exit 0
 fi
 echo "OK, ready after ${i}s (pid $PID)"
@@ -275,5 +375,5 @@ grep '^volume:' "$LOG" | sed 's/^volume: //; s/, partition.*//' | cut -c1-60
 grep -E '^[0-9]+ warnings?$' "$LOG"
 echo "In the OSD: Mount SD2 image ->"
 echo "  tsshare -> share.vhd, then reset."
-echo "Log: $LOG"
+echo "Log: $(short "$LOG")"
 exit 0

@@ -1,7 +1,7 @@
 #!/bin/sh
 # tsshare_stop.sh - stop the tsshare daemon (MiSTer Scripts menu).
 # Touches only $MOUNT (unmounts, keeps the directory) and the pid file.
-# MODE must match the start (view is the default).
+# The running daemon is found whatever MODE or MOUNT say.
 
 # ---- settings (override with environment variables) ----
 MODE="${MODE:-view}"
@@ -11,11 +11,19 @@ PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-10}"
 # MOUNTS_FILE: see the lib below
 # MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare.
-# MOUNT: use the real path (symlinked parents are not resolved).
+# The daemon is found by its own command line, so MODE and MOUNT only
+# matter for cleaning up a mount whose daemon is dead.
+# SCAN_PREFIX: see the lib.
 # --------------------------------------------------------
 
 # ---- BEGIN lib (identical in start and stop; test_scripts.sh diffs it) ----
-# MOUNTS_FILE is a test hook (a sample /proc/mounts).
+# MOUNTS_FILE is a test hook (a sample /proc/mounts); SCAN_PREFIX is
+# another (scan_any only looks at processes whose argv[0] starts with it).
+
+# a path for a message of at most 60 columns: the last 52 characters
+short() {
+	printf '%s\n' "$1" | sed 's/.*\(.\{52\}\)$/...\1/'
+}
 
 # $1 as it appears in /proc/mounts (octal escapes for \, space, tab)
 esc() {
@@ -66,7 +74,7 @@ is_ours() {
 	esac
 	[ "$_p" != "$$" ] && [ "$_p" != "$PPID" ] || return 1
 	alive "$_p" || return 1
-	tr '\0' '\n' < "/proc/$_p/cmdline" 2>/dev/null | {
+	tr '\0' '\n' 2>/dev/null < "/proc/$_p/cmdline" | {
 		IFS= read -r _a0 || exit 1
 		[ "${_a0##*/}" = tsshare ] || exit 1
 		_prev=
@@ -89,6 +97,47 @@ scan_pid() {
 	done
 	return 1
 }
+# the "-mount" value of a live process whose argv[0] basename is
+# tsshare (not this shell or its parent); empty if there is none
+ts_mount() {
+	_p="$1"
+	case "$_p" in
+	"" | *[!0-9]*) return 1 ;;
+	esac
+	[ "$_p" != "$$" ] && [ "$_p" != "$PPID" ] || return 1
+	alive "$_p" || return 1
+	tr '\0' '\n' 2>/dev/null < "/proc/$_p/cmdline" | {
+		IFS= read -r _a0 || exit 1
+		[ "${_a0##*/}" = tsshare ] || exit 1
+		_prev=
+		while IFS= read -r _a; do
+			if [ "$_prev" = -mount ] && [ -n "$_a" ]; then
+				echo "$_a"
+				exit 0
+			fi
+			_prev="$_a"
+		done
+		exit 1
+	}
+}
+
+# first process that is a tsshare daemon whatever its mount point
+# (scans /proc: a plain ps only lists some processes on some systems)
+scan_any() {
+	for _c in $(grep -l tsshare /proc/[0-9]*/cmdline 2>/dev/null |
+		sed 's|^/proc/\([0-9]*\)/cmdline$|\1|'); do
+		_a0="$(tr '\0' '\n' 2>/dev/null < "/proc/$_c/cmdline" | head -n 1)"
+		case "$_a0" in
+		"$SCAN_PREFIX"*) ;;
+		*) continue ;;
+		esac
+		if [ -n "$(ts_mount "$_c")" ]; then
+			echo "$_c"
+			return 0
+		fi
+	done
+	return 1
+}
 # ---- END lib ----
 
 # ---- BEGIN defaults (identical in start and stop; test_scripts.sh diffs it) ----
@@ -99,11 +148,14 @@ view | single) ;;
 	exit 1
 	;;
 esac
+ALT=
 if [ -z "$MOUNT" ]; then
 	if [ "$MODE" = view ]; then
 		MOUNT=/media/fat/games/TSConf/share
+		ALT=/media/fat/tsshare
 	else
 		MOUNT=/media/fat/tsshare
+		ALT=/media/fat/games/TSConf/share
 	fi
 fi
 # ---- END defaults ----
@@ -137,30 +189,49 @@ wait_down() {
 echo "If SD2 is still mounted in the OSD, eject"
 echo "it or reset the core first."
 
+# Find the daemon whatever MODE or MOUNT say: the pid file first, then a
+# process scan. A live process whose argv[0] is tsshare and that has
+# "-mount <dir>" is adopted with that dir; anything else in the pid file
+# is stale and is never signalled.
 PID=""
 if [ -f "$PIDFILE" ]; then
 	P="$(cat "$PIDFILE" 2>/dev/null)"
-	if is_ours "$P"; then
+	if [ -n "$(ts_mount "$P")" ]; then
 		PID="$P"
 	else
 		echo "Removed stale pid file (pid $P is not tsshare)."
 		rm -f "$PIDFILE"
 	fi
 fi
-[ -z "$PID" ] && PID="$(scan_pid)"
+[ -z "$PID" ] && PID="$(scan_any)"
+if [ -n "$PID" ]; then
+	M="$(ts_mount "$PID")"
+	if [ "$M" != "$MOUNT" ]; then
+		echo "Found the daemon mounted at:"
+		echo "  $(short "$M")"
+		MOUNT="$M"
+	fi
+fi
 
 if [ -z "$PID" ]; then
-	if is_mounted; then
+	# no daemon: clear a leftover tsshare mount at the default mount
+	# (or, with MOUNT not given, at the other mode's default)
+	LEFT=""
+	for m in "$MOUNT" "$ALT"; do
+		[ -n "$m" ] || continue
+		MOUNT="$m"
+		is_mounted || continue
+		LEFT=1
 		echo "No daemon, but a tsshare mount is left."
 		if lazy_umount "$MOUNT"; then
 			echo "Unmounted it (lazy)."
 		else
-			echo "FAILED to unmount $MOUNT"
+			echo "FAILED to unmount:"
+			echo "  $(short "$MOUNT")"
 			exit 1
 		fi
-	else
-		echo "tsshare is not running."
-	fi
+	done
+	[ -n "$LEFT" ] || echo "tsshare is not running."
 	exit 0
 fi
 

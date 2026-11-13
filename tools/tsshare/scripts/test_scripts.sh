@@ -12,6 +12,7 @@ command -v fusermount3 >/dev/null 2>&1 || { echo "SKIP: no fusermount3"; exit 0;
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/tsshare-scripts.XXXXXX")" || exit 1
 MOUNT="$T/mnt"
+LONGMNT=""
 HELPERS=""
 cleanup() {
 	trap '' INT TERM
@@ -22,17 +23,25 @@ cleanup() {
 	for h in $HELPERS; do kill -KILL "$h" 2>/dev/null; done
 	fusermount3 -uz "$MOUNT" 2>/dev/null
 	fusermount3 -uz "$T/vroot/share" 2>/dev/null
+	fusermount3 -uz "$T/vr2m" 2>/dev/null
+	fusermount3 -uz "$LONGMNT" 2>/dev/null
 	sleep 1
 	rm -rf "$T"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+cd "$T" || exit 1
+mkdir -p "$T/bin"
 if [ -z "$BIN" ]; then
-	BIN="$T/tsshare"
 	echo "building daemon..."
-	(cd "$TOP" && go build -o "$BIN" .) || { echo "FAIL: build"; exit 1; }
+	(cd "$TOP" && go build -o "$T/bin/tsshare" .) || { echo "FAIL: build"; exit 1; }
+else
+	cp "$BIN" "$T/bin/tsshare" || exit 1
 fi
+BIN="$T/bin/tsshare"
+# the scripts' process scan only looks at processes started from under $T
+SCAN_PREFIX="$T/"; export SCAN_PREFIX
 mkdir -p "$T/src/sub" "$T/conf"
 echo hello > "$T/src/a.txt"
 echo world > "$T/src/sub/b.txt"
@@ -74,6 +83,9 @@ mounted() { grep -q " $MOUNT fuse" /proc/mounts; }
 not_mounted() { ! mounted; }
 no_pidfile() { [ ! -e "$PIDFILE" ]; }
 has() { echo "$LAST" | grep -q "$1"; }
+not_has() { ! echo "$LAST" | grep -q "$1"; }
+dead() { ! kill -0 "$1" 2>/dev/null || grep -q '^State:.*Z' "/proc/$1/status" 2>/dev/null; }
+narrow() { test -z "$(echo "$LAST" | awk 'length($0) > 60')"; }
 
 # lib blocks must be identical in both scripts
 sed -n '/BEGIN lib/,/END lib/p' "$START" > "$T/lib.start"
@@ -197,13 +209,12 @@ check "MOUNT=/ refused by stop" 1 -- env MOUNT=/ sh "$STOP"
 LN="$(printf 'n%.0s' $(seq 1 90))"
 mkdir "$T/$LN"
 check "long source name" 0 -- sh "$START" "$T/$LN"
-expect "long name: no line over 60 columns" test -z "$(echo "$LAST" | grep -v '^Log:' | awk 'length($0) > 60')"
+expect "long name: no line over 60 columns" narrow
 sh "$STOP" > /dev/null 2>&1
 
 # output width: no line longer than 60 columns (paths of the temp dir excluded)
 check "width probe" 0 -- sh "$START" "$T/src"
-LONG="$(echo "$LAST" | grep -v "^Log:" | awk 'length($0) > 60')"
-expect "no output line over 60 columns" test -z "$LONG"
+expect "no output line over 60 columns" narrow
 sh "$STOP" > /dev/null 2>&1
 
 check "stop with nothing running" 0 -- sh "$STOP"
@@ -217,7 +228,8 @@ check "non-executable BIN" 1 -- env BIN="$T/ne/tsshare" sh "$START" "$T/src"
 expect "non-executable message" has "not executable"
 
 check "unwritable LOG" 1 -- env LOG="$T/no/such/dir/tsshare.log" sh "$START" "$T/src"
-expect "unwritable LOG message" has "read-only or full SD card"
+expect "unwritable LOG message" has "read-only"
+expect "unwritable LOG: no line over 60 columns" narrow
 not_mounted_ok() { not_mounted && no_pidfile; }
 expect "unwritable LOG leaves nothing running" not_mounted_ok
 
@@ -297,7 +309,7 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	expect "view: OSD names" has "<name>.vhd or shared.vhd"
 	expect "view: created shared" has "Created folder: shared"
 	expect "view: created mount" has "Created folder: share"
-	expect "view: no line over 60 columns" test -z "$(echo "$LAST" | grep -v '^Log:' | awk 'length($0) > 60')"
+	expect "view: no line over 60 columns" narrow
 	expect "view: mounted" vmounted
 	expect "view: pid file written" test -s "$PIDFILE"
 	expect "view: shared.vhd" test -e "$VMOUNT/shared.vhd"
@@ -316,7 +328,12 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	check "view: restart" 0 -- env $VENV sh "$START"
 	expect "view: nothing created the second time" test -z "$(echo "$LAST" | grep Created)"
 	expect "view: shared.vhd after restart" test -e "$VMOUNT/shared.vhd"
-	check "view: stop (restart)" 0 -- env $VENV sh "$STOP"
+	# stop finds the daemon whatever MODE and MOUNT say (default MOUNT is
+	# elsewhere, and the pid file names a live tsshare of another mount)
+	check "view: stop with MODE=single and the default MOUNT" 0 -- env -u MOUNT MODE=single sh "$STOP"
+	expect "mode-independent stop: reported the mount" has "Found the daemon"
+	expect "mode-independent stop: not called stale" not_has stale
+	expect "mode-independent stop: pid file removed" no_pidfile
 	expect "view: unmounted (restart)" not_vmounted
 	check "view: stop with nothing running" 0 -- env $VENV sh "$STOP"
 	# argument = zip root
@@ -331,9 +348,84 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	check "view: MOUNT inside SHARED via symlink (daemon check)" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vlink" MOUNT="$T/vroot/shared/m2" sh "$START"
 	expect "view: daemon check leaves no pid file" no_pidfile
 	rm -rf "$T/vroot/shared/m" "$T/vroot/shared/m2"
+	# SHARED follows ZIPROOT (here the argument, with trailing slashes)
+	mkdir -p "$T/vr2"; mkzip "$T/vr2/z.zip"
+	check "view: argument root, SHARED follows it" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$START" "$T/vr2//"
+	expect "view: summary names the root" has "^Viewing: vr2$"
+	expect "view: SHARED created under the argument root" test -d "$T/vr2/shared"
+	expect "view: z.vhd" test -e "$T/vr2m/z.vhd"
+	check "view: stop (argument root)" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$STOP"
+	expect "view: unmounted (argument root)" test ! -e "$T/vr2m/z.vhd"
+	# a non-empty MOUNT directory is announced
+	mkdir -p "$T/vr2m"; echo x > "$T/vr2m/old.txt"
+	check "view: non-empty MOUNT" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$START" "$T/vr2"
+	expect "view: files-hidden note" has "Note: files in MOUNT are hidden"
+	check "view: stop (non-empty MOUNT)" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$STOP"
+	# refusals create nothing
+	check "view: relative ZIPROOT" 1 -- env MODE=view ZIPROOT=vroot MOUNT="$T/rm1" sh "$START"
+	expect "view: relative ZIPROOT message" has "ZIPROOT must be an absolute"
+	check "view: relative MOUNT" 1 -- env MODE=view ZIPROOT="$T/vroot" MOUNT="rel/mnt" sh "$START"
+	expect "view: relative MOUNT message" has "MOUNT must be an absolute"
+	expect "view: relative MOUNT created nothing" test ! -e rel
+	check "view: SHARED inside MOUNT" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/mm/sh" MOUNT="$T/mm" sh "$START"
+	expect "view: SHARED inside MOUNT message" has "SHARED must not be inside"
+	expect "view: SHARED inside MOUNT created nothing" test ! -e "$T/mm"
+	check "view: MOUNT inside SHARED (nothing created)" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/ss" MOUNT="$T/ss/m" sh "$START"
+	expect "view: MOUNT inside SHARED created nothing" test ! -e "$T/ss"
+	check "view: MOUNT equal to ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/zz9" MOUNT="$T/vroot/" sh "$START"
+	expect "view: MOUNT = ZIPROOT message" has "ZIPROOT must not be inside"
+	expect "view: MOUNT = ZIPROOT created nothing" test ! -e "$T/zz9"
+	check "view: ZIPROOT /" 1 -- env MODE=view ZIPROOT=// MOUNT="$T/rm2" sh "$START"
+	expect "view: ZIPROOT / message" has "must not be /"
+	# 90-character paths: every printed line stays within 60 columns
+	R="$T/$LN"; mkdir -p "$R/zr"; mkzip "$R/zr/a.zip"
+	LONGMNT="$R/mnt$LN"
+	check "long: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$R/zz" MOUNT="$LONGMNT" sh "$START"
+	expect "long: missing ZIPROOT narrow" narrow
+	check "long: MOUNT inside SHARED" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/zr/shared" MOUNT="$R/zr/shared/m" sh "$START"
+	expect "long: MOUNT inside SHARED narrow" narrow
+	check "long: start" 0 -- env MODE=view ZIPROOT="$R/zr" MOUNT="$LONGMNT" sh "$START"
+	expect "long: start narrow" narrow
+	expect "long: a.vhd" test -e "$LONGMNT/a.vhd"
+	check "long: second start" 1 -- env MODE=view ZIPROOT="$R/zr" MOUNT="$LONGMNT" sh "$START"
+	expect "long: second start narrow" narrow
+	check "long: stop (other MOUNT default, prints the mount)" 0 -- env -u MOUNT MODE=view sh "$STOP"
+	expect "long: stop narrow" narrow
+	expect "long: stop adopted the mount" has "Found the daemon"
+	# the daemon's refusal through a symlink: the END of its long message is shown
+	ln -s "$R/zr/shared" "$R/lnk"
+	check "long: daemon refuses (symlinked SHARED)" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/lnk" MOUNT="$R/zr/shared/m3" sh "$START"
+	expect "long: daemon refusal narrow" narrow
+	expect "long: log tail shows the end of the message" has "its own mount"
+	rm -rf "$R/zr/shared/m3"
 else
 	echo "skip: view tests (no python3 or zip)"
 fi
+# stop finds a daemon started in the other mode, and without a pid file
+check "xmode: start (single)" 0 -- env MODE=single sh "$START" "$T/src"
+check "xmode: stop with MODE=view and the default MOUNT" 0 -- env -u MOUNT MODE=view sh "$STOP"
+expect "xmode: reported the mount" has "Found the daemon"
+expect "xmode: not stale" not_has stale
+expect "xmode: unmounted" not_mounted
+expect "xmode: pid file removed" no_pidfile
+check "xmode: start again" 0 -- env MODE=single sh "$START" "$T/src"
+rm -f "$PIDFILE"
+check "xmode: stop without a pid file (process scan)" 0 -- env -u MOUNT MODE=view sh "$STOP"
+expect "xmode: scan found it" has "Found the daemon"
+expect "xmode: unmounted (scan)" not_mounted
+# a pid file naming a live tsshare of ANOTHER mount: adopted, not stale
+spare tsshare -mount "$T/elsewhere"
+echo "$FP" > "$PIDFILE"
+check "start refuses while a tsshare of another mount runs" 1 -- env MODE=single sh "$START" "$T/src"
+expect "start: already running" has "already running"
+expect "start: pid file kept" test -s "$PIDFILE"
+expect "start: that daemon still alive" kill -0 "$FP"
+check "stop adopts a live tsshare of another mount" 0 -- sh "$STOP"
+expect "adopted: not stale" not_has stale
+expect "adopted: reported its mount" has "elsewhere"
+expect "adopted: the process was stopped" dead "$FP"
+expect "adopted: pid file removed" no_pidfile
+
 check "view: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/nozip" SHARED="$T/nozip/shared" MOUNT="$T/nozip/share" sh "$START"
 expect "view: missing ZIPROOT message" has "folder not found"
 expect "view: missing ZIPROOT created nothing" test ! -e "$T/nozip"

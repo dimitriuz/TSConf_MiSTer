@@ -24,6 +24,11 @@ mode is built and tested on the host only; the board test is pending. See
 
 ## Quick start on the board (view mode)
 
+Requirements: the dual-VHD core build (the TSConf core with a second SD slot,
+for example `TSConf_dualsd_20261113`) is needed for "Mount SD2 image"; and the
+folder `/media/fat/games/TSConf` must already exist (the start script refuses
+otherwise, it creates only `shared` and `share` inside it).
+
 1. Copy three files to the SD card (the layout follows the Companion Remote
    daemon, `Scripts/.config/<name>/`):
 
@@ -35,31 +40,48 @@ mode is built and tested on the host only; the board test is pending. See
 
 2. In the Scripts menu run `tsshare_start.sh`. It views `ZIPROOT`
    (`/media/fat/games/TSConf`), serves the folder `SHARED`
-   (`/media/fat/games/TSConf/shared`) as `shared.vhd`, and mounts at `MOUNT`
+   (`/media/fat/games/TSConf/shared`; by default `$ZIPROOT/shared`) as `shared.vhd`, and mounts at `MOUNT`
    (`/media/fat/games/TSConf/share`). It creates `shared` and `share` if they are
    missing (one line each) and prints `View ready: pick in the OSD` after about a
    second: the daemon scans nothing at start. From a shell you can pass another
-   zip root: `sh /media/fat/Scripts/tsshare_start.sh /path/to/root`.
+   zip root, which replaces `ZIPROOT`: `sh /media/fat/Scripts/tsshare_start.sh
+   /path/to/root`. `SHARED` then defaults to `/path/to/root/shared`, but the
+   default `MOUNT` stays `/media/fat/games/TSConf/share` unless you give it. All
+   three paths must be absolute. The script checks them (and that `MOUNT` is not
+   inside `SHARED`, `SHARED` not inside `MOUNT`, `ZIPROOT` not inside `MOUNT`)
+   before it creates anything. If `MOUNT` already holds files it prints
+   `Note: files in MOUNT are hidden while mounted` and goes on.
 3. Load the TSConf core, open the OSD, **Mount SD2 image**. The picker starts in
    `games/TSConf` and its folder tree mirrors that folder: go into `share` and pick
    `<zip name>.vhd` (a zip in a subfolder appears under the same subfolder) or
    `shared.vhd`, then reset the core. Wild Commander shows the disk as the SD2
    card (in the single-mode board test it was `6:\`).
 4. When done: eject the image in the OSD (or reset the core), then run
-   `tsshare_stop.sh`.
+   `tsshare_stop.sh`. It finds the daemon by its own command line (the pid
+   file, else a scan of `/proc` for a process named `tsshare` with `-mount`),
+   so it works whatever `MODE` or `MOUNT` it is run with, and prints
+   `Found the daemon mounted at:` when that mount differs from its default.
+   It unmounts only a `fuse.tsshare` mount at exactly the daemon's `-mount`.
+
+Not known yet, to be checked in the board test: after a core reload, does
+Main_MiSTer re-mount the remembered `share/...vhd` image by itself, and what
+happens when the daemon is not running at that moment (the path is then an
+empty directory)? Until that is tested, start the daemon before loading the
+core and expect to select the image again.
 
 ### Single mode (the alternative)
 
 `MODE=single` keeps the old behaviour: one folder or zip, one file `share.vhd`,
 mounted at `/media/fat/tsshare`. Set it for both scripts (environment or the
-settings block; the stop script must see the same `MODE`):
+settings block):
 
 ```
 MODE=single SRC=/path/to/folder-or-zip sh /media/fat/Scripts/tsshare_start.sh
-MODE=single sh /media/fat/Scripts/tsshare_stop.sh
+sh /media/fat/Scripts/tsshare_stop.sh
 ```
 
-The first argument of `tsshare_start.sh` is `SRC` in this mode. In the OSD:
+The first argument of `tsshare_start.sh` is `SRC` in this mode.
+`tsshare_stop.sh` needs no `MODE`. In the OSD:
 Mount SD2 image, go to `tsshare`, pick `share`. The script then prints the
 geometry and the warning count.
 
@@ -94,10 +116,10 @@ you put there). They edit no other file; they never touch `user-startup.sh` or
 other cores' files.
 
 Settings (environment variables or the block at the top of
-`tsshare_start.sh`): `MODE` (`view`), `ZIPROOT`, `SHARED`, `MOUNT` (view:
+`tsshare_start.sh`): `MODE` (`view`), `ZIPROOT`, `SHARED` (default `$ZIPROOT/shared`), `MOUNT` (view:
 `/media/fat/games/TSConf/share`, single: `/media/fat/tsshare`), `SRC` (single
 mode), `BIN`, `CACHE_MB` (32), `LABEL` (`TSSHARE`). Test hooks, used by
-`scripts/test_scripts.sh`: `CONF_DIR`, `LOG`, `PIDFILE`, `WAIT_SECS`. The start
+`scripts/test_scripts.sh`: `CONF_DIR`, `LOG`, `PIDFILE`, `WAIT_SECS`, `MOUNTS_FILE`, `SCAN_PREFIX`. The start
 script waits up to 90 s for the mount and `shared.vhd` (`share.vhd` in single
 mode), and stops early with the log tail if the daemon dies.
 
@@ -149,18 +171,20 @@ browsing), never a disk.
 
 ## How it works
 
-1. One scan of the source builds an in-memory tree (name, size, mtime).
+1. One scan of the source builds an in-memory tree (name, size, mtime). (In
+   view mode this happens per zip or for the shared folder, when it is first
+   opened; items 2 to 9 then apply to each volume built that way.)
 2. A virtual disk is laid out from it: MBR, one FAT32 partition (type 0x0C)
    at sector 128, 2 FATs, no stored FAT table.
 3. Allocation is contiguous and deterministic: root directory, then each
    directory, then each file's clusters in sorted order. A FAT sector is
    computed on demand from the extent table; directory sectors are generated
    from the tree (long names as UTF-16 entries plus an 8.3 alias).
-4. Reads of `share.vhd` are answered from those pieces; file data comes from
+4. Reads of `share.vhd` (or `<name>.vhd`, `shared.vhd`) are answered from those pieces; file data comes from
    the source (a directory file, a stored zip entry at its offset, or a
    deflated zip entry inflated into an in-memory LRU).
 5. Folder sources keep a small LRU of open file descriptors (`-fd-limit`).
-6. `share.vhd` is mode 0444 and opened with direct I/O (one source read per
+6. The `.vhd` files are mode 0444 and opened with direct I/O (one source read per
    request, no kernel readahead); writes return EROFS.
 7. The daemon answers every request it can: errors become EIO and panics are
    caught per request. It has no per-read deadline, though. A source that is
@@ -173,7 +197,8 @@ browsing), never a disk.
 8. SIGINT/SIGTERM unmount (lazily if busy); a second signal forces a lazy
    unmount and exit.
 9. The Go heap has a soft limit and a GC setting tuned for the board's RAM.
-10. There is no rescan while mounted (see below).
+10. In single mode there is no rescan while mounted (see below); in view mode
+    a volume is rebuilt after its idle time or when its zip changed.
 
 ## Flags
 
@@ -373,6 +398,8 @@ NOT verified on the board:
 | `Transport endpoint is not connected` | The daemon died without unmounting. Run `tsshare_stop.sh` (or `umount -l <MOUNT>`). |
 | Start says already running | Run `tsshare_stop.sh`, then start again. |
 | A zip opens with an error in view mode | Three sources are already open (`EBUSY`), or the zip changed while the image was open. Eject and try again. |
-| Start refuses: MOUNT inside SHARED | Pick a `MOUNT` outside the shared folder. |
+| Start refuses: MOUNT inside SHARED (or SHARED inside MOUNT, ZIPROOT inside MOUNT) | Pick a `MOUNT` that is a separate folder from the other two. |
+| Start says "must be an absolute path" | `ZIPROOT`, `SHARED` and `MOUNT` must start with `/`. |
+| The start message ends in `...` | Long paths are shortened to their last 52 characters; the log (`tsshare.log`) has the full text. |
 | Start fails with the log tail shown | The log tail is the daemon's error (bad zip, source unreadable, mount refused). |
 | Folder shows fewer files than the source | Count of `warnings` in the log; see the skip list above. |

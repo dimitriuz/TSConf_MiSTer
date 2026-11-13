@@ -1,4 +1,4 @@
-package tsshare
+package main
 
 import "time"
 

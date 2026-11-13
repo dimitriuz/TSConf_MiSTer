@@ -1,5 +1,5 @@
 // Package tsshare builds a read-only FAT32 view of a folder or zip.
-package tsshare
+package main
 
 import (
 	"fmt"

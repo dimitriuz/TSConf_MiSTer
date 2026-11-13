@@ -224,7 +224,7 @@ NOT verified on the board:
 
 | Symptom | Check |
 | --- | --- |
-| `share.vhd` not visible in the OSD picker | Is the daemon up (`cat /media/fat/Scripts/.config/tsshare/tsshare.pid`, `ls /media/fat/tsshare`)? Read `tsshare.log`. The picker may need a re-open of the OSD after the start; the file is only offered in the SD2 mount dialog. |
+| `share.vhd` not visible in the OSD picker | Is the daemon up (`cat /media/fat/Scripts/.config/tsshare/tsshare.pid`, `ls /media/fat/tsshare`)? Read `tsshare.log`. Open the OSD again after the start (untested on the board whether the picker caches its listing). |
 | WC shows no card | Reset the core after mounting; check that the image is selected under SD2, not SD1. Check `tsshare.log` for `read error`; run with `-v -log` to see whether the core reads at all. |
 | Slow start | The scan walks every entry once: slow NAS metadata makes it slow (the real zip took 0.4 s on the host). The start script waits 90 s. A folder on a slow share can take longer; start from a shell to watch the log. |
 | `Transport endpoint is not connected` | The daemon died without unmounting. Run `tsshare_stop.sh` (or `umount -l /media/fat/tsshare`). |

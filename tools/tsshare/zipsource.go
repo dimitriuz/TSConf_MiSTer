@@ -223,6 +223,11 @@ func (s *zipSource) inflate(zf *zip.File) (*cdata, error) {
 		return nil, err
 	}
 	defer rc.Close()
+	// Entries over the cache budget use the streaming path; never convert a
+	// size that big to int (it can wrap negative on 32-bit systems).
+	if zf.UncompressedSize64 > uint64(s.budget) {
+		return nil, fmt.Errorf("%s: %s: entry of %d bytes exceeds the cache budget", s.zpath, zf.Name, zf.UncompressedSize64)
+	}
 	buf := s.cache.alloc(int(zf.UncompressedSize64))
 	for off := 0; off < buf.n; off += blockSize {
 		if _, err := io.ReadFull(rc, buf.blk[off/blockSize][:min(blockSize, buf.n-off)]); err != nil {

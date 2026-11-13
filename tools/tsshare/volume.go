@@ -27,6 +27,7 @@ type VolumeOptions struct {
 	Label             string // up to 11 chars, upper-cased; default TSSHARE
 	PartStartSector   int    // default 128
 	SectorsPerCluster int    // 0 = choose from the content
+	MaxEntries        int    // 0 = no limit; files plus directories (with the root)
 }
 
 // dirExtent is one directory: its encoded bytes and its clusters.
@@ -185,6 +186,33 @@ func cleanLabel(l string) string {
 	return string(b)
 }
 
+// tooManyEntries is returned when a source holds more files and directories
+// than -max-entries allows.
+type tooManyEntries struct{ n, max int }
+
+func (e *tooManyEntries) Error() string {
+	return fmt.Sprintf("the source has %d files and directories, more than the limit of %d (each costs about 550 bytes of RAM on the board); raise it with -max-entries N, or use -max-entries 0 for no limit", e.n, e.max)
+}
+
+// checkEntryLimit reports an error when n exceeds max (0 = unlimited).
+func checkEntryLimit(n, max int) error {
+	if max > 0 && n > max {
+		return &tooManyEntries{n, max}
+	}
+	return nil
+}
+
+// countNodes counts the nodes of the tree, the root included.
+func countNodes(n *Node) int {
+	c := 1
+	for _, k := range n.Children {
+		if k != nil {
+			c += countNodes(k)
+		}
+	}
+	return c
+}
+
 // NewVolume scans src and lays out the disk. The returned warnings cover the
 // source's own and every name changed or entry dropped here.
 func NewVolume(src Source, opt VolumeOptions) (*Volume, []string, error) {
@@ -194,6 +222,9 @@ func NewVolume(src Source, opt VolumeOptions) (*Volume, []string, error) {
 	}
 	if root == nil || !root.IsDir {
 		return nil, warns, errors.New("tsshare: source has no root directory")
+	}
+	if n := countNodes(root); checkEntryLimit(n, opt.MaxEntries) != nil {
+		return nil, warns, checkEntryLimit(n, opt.MaxEntries)
 	}
 	if opt.PartStartSector == 0 {
 		opt.PartStartSector = defaultPartStart

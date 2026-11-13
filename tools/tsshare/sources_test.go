@@ -935,3 +935,23 @@ func TestCacheBudgetPinned(t *testing.T) {
 	}
 	c.mu.Unlock()
 }
+
+// inflate never converts an entry bigger than the cache budget to int; such
+// entries use the streaming path.
+func TestInflateRefusesOverBudget(t *testing.T) {
+	s, _, _, _ := zipFixture(t, 1)
+	defer s.Close()
+	zs := s.(*zipSource)
+	var big *zip.File
+	for _, zf := range zs.files {
+		if zf.Name == "d/big.deflat" {
+			big = zf
+		}
+	}
+	if big == nil {
+		t.Fatal("fixture entry missing")
+	}
+	if _, err := zs.inflate(big); err == nil || !strings.Contains(err.Error(), "cache budget") {
+		t.Errorf("inflate of a 3 MB entry with a 1 MB budget: %v", err)
+	}
+}

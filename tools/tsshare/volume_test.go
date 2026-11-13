@@ -720,3 +720,28 @@ func TestDataAreaAligned(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckEntryLimit(t *testing.T) {
+	for _, c := range []struct {
+		n, max int
+		ok     bool
+	}{{10, 0, true}, {1 << 30, 0, true}, {10, 10, true}, {11, 10, false}, {250001, 250000, false}} {
+		err := checkEntryLimit(c.n, c.max)
+		if (err == nil) != c.ok {
+			t.Errorf("n=%d max=%d: %v", c.n, c.max, err)
+		}
+		if err != nil && (!strings.Contains(err.Error(), fmt.Sprint(c.n)) || !strings.Contains(err.Error(), "-max-entries")) {
+			t.Errorf("message lacks count or flag: %v", err)
+		}
+	}
+	src := newMemSource(smallFixture())
+	if _, _, err := NewVolume(src, VolumeOptions{MaxEntries: 5}); err == nil {
+		t.Error("NewVolume accepted a tree over the limit")
+	}
+	if _, _, err := NewVolume(newMemSource(smallFixture()), VolumeOptions{MaxEntries: 100}); err != nil {
+		t.Errorf("under the limit: %v", err)
+	}
+	if _, _, err := NewVolume(newMemSource(smallFixture()), VolumeOptions{}); err != nil {
+		t.Errorf("no limit: %v", err)
+	}
+}

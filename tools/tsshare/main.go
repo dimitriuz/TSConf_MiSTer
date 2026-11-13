@@ -26,7 +26,31 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-const maxShownWarnings = 30
+const (
+	maxShownWarnings  = 30
+	defaultMaxEntries = 250000
+	maxCacheMB        = 256
+)
+
+// checkCacheMB validates -cache-mb: 0 means the default, else 1..maxCacheMB.
+func checkCacheMB(mb int) error {
+	if mb < 0 || mb > maxCacheMB {
+		return fmt.Errorf("-cache-mb %d out of range: use 1 to %d (0 = the default, 32)", mb, maxCacheMB)
+	}
+	return nil
+}
+
+// preferOOMKill asks the kernel to pick this process before Main_MiSTer when
+// memory runs out. Best effort.
+func preferOOMKill(verbose bool) {
+	if err := os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0o644); err != nil {
+		if verbose {
+			log.Printf("oom_score_adj: %v", err)
+		}
+	} else if verbose {
+		log.Printf("oom_score_adj set to 1000")
+	}
+}
 
 type root struct {
 	fs.Inode
@@ -203,7 +227,8 @@ func main() {
 	src := flag.String("src", "", "directory or zip file to share (required)")
 	mnt := flag.String("mount", "", "mount point directory (required)")
 	label := flag.String("label", defaultLabel, "FAT volume label")
-	cacheMB := flag.Int("cache-mb", 32, "zip: MiB of inflated entries kept in memory")
+	cacheMB := flag.Int("cache-mb", 32, "zip: MiB of inflated entries kept in memory, 1 to 256 (0 = the default, 32)")
+	maxEntries := flag.Int("max-entries", defaultMaxEntries, "refuse sources with more files and directories than this (0 = no limit)")
 	fdLimit := flag.Int("fd-limit", 64, "directory: open file descriptors kept")
 	logPath := flag.String("log", "", "log file for the read log and warnings (default: none)")
 	verbose := flag.Bool("v", false, "write one line per read to the -log file")
@@ -216,8 +241,15 @@ func main() {
 	if *verbose && *logPath == "" {
 		fatal("-v needs -log <file>")
 	}
+	if err := checkCacheMB(*cacheMB); err != nil {
+		fatal("%v", err)
+	}
+	if *maxEntries < 0 {
+		fatal("-max-entries %d: use 0 (no limit) or a positive number", *maxEntries)
+	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("tsshare: ")
+	preferOOMKill(*verbose)
 	if os.Getenv("GOGC") == "" {
 		// The live heap is mostly the cache and the tree; at the default 100%
 		// the collector would let it double (about 220 MB on SD.zip).
@@ -275,7 +307,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "source: %s %s\n", kind, *src)
 	sd.abortIfCancelled()
-	vol, warns, err := NewVolume(s, VolumeOptions{Label: *label})
+	vol, warns, err := NewVolume(s, VolumeOptions{Label: *label, MaxEntries: *maxEntries})
 	if err != nil {
 		s.Close()
 		fatal("cannot build a FAT32 volume from %s: %v", *src, err)

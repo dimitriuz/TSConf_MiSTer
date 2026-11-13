@@ -414,6 +414,43 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
+func TestCacheMBValidation(t *testing.T) {
+	for mb, ok := range map[int]bool{-1: false, 0: true, 1: true, 256: true, 257: false, 2048: false} {
+		if (checkCacheMB(mb) == nil) != ok {
+			t.Errorf("checkCacheMB(%d) = %v", mb, checkCacheMB(mb))
+		}
+	}
+	needFuse(t)
+	src := makeZip(t)
+	for _, v := range []string{"-1", "2048"} {
+		mnt := t.TempDir()
+		cmd := exec.Command(daemonBin, "-src", src, "-mount", mnt, "-cache-mb", v)
+		var se bytes.Buffer
+		cmd.Stderr = &se
+		if c := exitCode(cmd.Run()); c != 2 || !strings.Contains(se.String(), "-cache-mb") || isMounted(mnt) {
+			t.Errorf("-cache-mb %s: exit %d, stderr %q", v, c, se.String())
+		}
+	}
+}
+
+func TestMaxEntries(t *testing.T) {
+	needFuse(t)
+	src := makeTree(t) // more than 3 files and directories
+	mnt := t.TempDir()
+	cmd := exec.Command(daemonBin, "-src", src, "-mount", mnt, "-max-entries", "3")
+	var se bytes.Buffer
+	cmd.Stderr = &se
+	c := exitCode(cmd.Run())
+	if c != 2 || !strings.Contains(se.String(), "-max-entries") || !strings.Contains(se.String(), "files and directories") || isMounted(mnt) {
+		t.Fatalf("exit %d, mounted=%v, stderr %q", c, isMounted(mnt), se.String())
+	}
+	// 0 disables the check
+	d := startDaemon(t, src, "-max-entries", "0")
+	if err := d.stop(t); exitCode(err) != 143 && err != nil {
+		t.Logf("stop: %v", err)
+	}
+}
+
 func TestBadSource(t *testing.T) {
 	needFuse(t)
 	tmp := t.TempDir()

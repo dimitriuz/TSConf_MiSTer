@@ -69,6 +69,7 @@ localparam CONF_STR = {
 	"TSConf;",
 	"UART115200,MIDI;",
 	"SC0,VHD,Mount SD image;",
+	"SC1,VHD,Mount SD2 image;",
 	"-;",
 	"OFH,Joystick 1,Kempston,Sinclair 1,Sinclair 2,Cursor,QAOPM;",
 	"OIK,Joystick 2,Kempston,Sinclair 1,Sinclair 2,Cursor,QAOPM;",
@@ -185,15 +186,15 @@ wire [10:0] ps2_key;
 wire forced_scandoubler;
 wire [21:0] gamma_bus;
 
-wire [31:0] sd_lba;
-wire sd_rd;
-wire sd_wr;
-wire sd_ack;
+wire [31:0] sd_lba0, sd_lba1;
+wire [1:0] sd_rd;
+wire [1:0] sd_wr;
+wire [1:0] sd_ack;
 wire [8:0] sd_buff_addr;
 wire [7:0] sd_buff_dout;
-wire [7:0] sd_buff_din;
+wire [7:0] sd_buff_din0, sd_buff_din1;
 wire sd_buff_wr;
-wire img_mounted;
+wire [1:0] img_mounted;
 wire img_readonly;
 wire [63:0] img_size;
 wire [64:0] RTC;
@@ -204,7 +205,7 @@ wire [7:0] ioctl_dout;
 wire ioctl_download;
 wire [15:0] ioctl_index;
 
-hps_io #(.CONF_STR(CONF_STR)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -223,13 +224,13 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ps2_mouse_ext(ps2_mouse_ext),
 	.ps2_key(ps2_key),
 
-	.sd_lba('{sd_lba}),
+	.sd_lba('{sd_lba0, sd_lba1}),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din('{sd_buff_din}),
+	.sd_buff_din('{sd_buff_din0, sd_buff_din1}),
 	.sd_buff_wr(sd_buff_wr),
 	.img_mounted(img_mounted),
 	.img_readonly(img_readonly),
@@ -473,8 +474,8 @@ assign DDRAM_DIN      = 0;
 assign DDRAM_BE       = 0;
 assign DDRAM_WE       = 0;
 
-assign LED_USER = (vsd_sel & sd_act) | ioctl_download;
-assign LED_DISK = {1'b1, ~vsd_sel & sd_act};
+assign LED_USER = (|vsd_sel & sd_act) | ioctl_download;
+assign LED_DISK = {1'b1, ~|vsd_sel & sd_act};
 
 //////////////////   VIDEO   ///////////////////
 reg [7:0] R_r,G_r,B_r;
@@ -564,37 +565,73 @@ wire sdmosi;
 wire sdss, sdss2;
 
 reg reset_img;
-reg vsd_sel = 0;
+reg [1:0] vsd_sel = 0;
 always @(posedge clk_sys) begin
 	integer reset_timeout = 0;
 	if(reset_timeout) reset_timeout <= reset_timeout - 1;
 	else reset_img <= 0;
 
-	if(img_mounted) begin
-		vsd_sel <= |img_size;
+	if(img_mounted[0]) vsd_sel[0] <= |img_size;
+	if(img_mounted[1]) vsd_sel[1] <= |img_size;
+	if(|img_mounted) begin
 		reset_img <= 1;
 		reset_timeout <= 10000000;
 	end
 end
 
-wire vsdmiso;
-wire sdmiso = !vsd_sel ? SD_MISO :
-	!sdss  ? vsdmiso :
-	!sdss2 ? SD_MISO : 1'b1;
+wire vsdmiso0, vsdmiso1;
+wire sdmiso = (vsd_sel == 2'b00) ? SD_MISO :
+	(vsd_sel[0] & !sdss)  ? vsdmiso0 :
+	(vsd_sel[1] & !sdss2) ? vsdmiso1 :
+	!SD_CS ? SD_MISO : 1'b1;
 
-sd_card sd_card
+sd_card sd_card0
 (
-	.*,
+	.clk_sys(clk_sys),
 	.reset(reset_out),
 	.clk_spi(clk_sys),
-	.sdhc(1),
+	.sdhc(1'b1),
+	.img_mounted(img_mounted[0]),
+	.img_size(img_size),
+	.sd_lba(sd_lba0),
+	.sd_rd(sd_rd[0]),
+	.sd_wr(sd_wr[0]),
+	.sd_ack(sd_ack[0]),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din0),
+	.sd_buff_wr(sd_buff_wr),
 	.sck(sdclk),
-	.ss(~vsd_sel | sdss),
+	.ss(~vsd_sel[0] | sdss),
 	.mosi(sdmosi),
-	.miso(vsdmiso)
+	.miso(vsdmiso0)
 );
 
-assign SD_CS = vsd_sel ? sdss2 : sdss;
+sd_card sd_card1
+(
+	.clk_sys(clk_sys),
+	.reset(reset_out),
+	.clk_spi(clk_sys),
+	.sdhc(1'b1),
+	.img_mounted(img_mounted[1]),
+	.img_size(img_size),
+	.sd_lba(sd_lba1),
+	.sd_rd(sd_rd[1]),
+	.sd_wr(sd_wr[1]),
+	.sd_ack(sd_ack[1]),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din1),
+	.sd_buff_wr(sd_buff_wr),
+	.sck(sdclk),
+	.ss(~vsd_sel[1] | sdss2),
+	.mosi(sdmosi),
+	.miso(vsdmiso1)
+);
+
+assign SD_CS = (vsd_sel == 2'b00) ? sdss :
+	(vsd_sel == 2'b01) ? sdss2 :
+	(vsd_sel == 2'b10) ? sdss : 1'b1;
 assign SD_SCK = sdclk & ~SD_CS;
 assign SD_MOSI = sdmosi & ~SD_CS;
 

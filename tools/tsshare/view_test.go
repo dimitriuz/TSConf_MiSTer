@@ -1077,3 +1077,58 @@ func TestViewDirectIOAndInterrupt(t *testing.T) {
 		t.Fatalf("O_RDWR: %v", errno)
 	}
 }
+
+func TestViewGetattrUsesListingCache(t *testing.T) {
+	root := t.TempDir()
+	zp := filepath.Join(root, "a.zip")
+	writeZipFile(t, zp, aFiles)
+	zst, _ := os.Stat(zp)
+	ttl := 400 * time.Millisecond
+	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), ttl)
+	var stats atomic.Int32
+	d.v.statFn = func(p string) (os.FileInfo, error) { stats.Add(1); return os.Stat(p) }
+	f := &viewFile{v: d.v, parent: d, name: "a.vhd", real: zp}
+	get := func() *fuse.AttrOut {
+		var out fuse.AttrOut
+		if errno := f.Getattr(context.Background(), nil, &out); errno != 0 {
+			t.Fatal(errno)
+		}
+		return &out
+	}
+	if _, err := d.listing(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		out := get()
+		if int64(out.Size) != zst.Size() || out.Mode&0777 != 0444 {
+			t.Fatalf("attr %+v, zip size %d", out.Attr, zst.Size())
+		}
+	}
+	if n := stats.Load(); n != 0 {
+		t.Fatalf("%d stats of the real zip within the listing TTL", n)
+	}
+	time.Sleep(ttl + 50*time.Millisecond)
+	if out := get(); int64(out.Size) != zst.Size() {
+		t.Fatalf("size after expiry %d", out.Size)
+	}
+	if n := stats.Load(); n != 1 {
+		t.Fatalf("%d stats after the cache expired, want 1", n)
+	}
+	// Open stats the real file (mtime) once and reports the built size afterwards
+	h, _, errno := f.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	defer f.Release(context.Background(), h)
+	if n := stats.Load(); n != 2 {
+		t.Fatalf("%d stats after open", n)
+	}
+	var out fuse.AttrOut
+	f.Getattr(context.Background(), h, &out)
+	if out.Size == uint64(zst.Size()) || out.Size == 0 {
+		t.Fatalf("size on the open handle %d (zip %d)", out.Size, zst.Size())
+	}
+	if n := stats.Load(); n != 2 {
+		t.Fatalf("Getattr on a handle stat'ed the zip (%d)", n)
+	}
+}

@@ -194,12 +194,26 @@ func (l *lister) list(dir string, excl []string, ttl time.Duration, reserved []s
 	return lst.entries, nil
 }
 
+func listKey(dir string, excl, reserved []string) string {
+	return dir + "\x00" + strings.Join(excl, "\x01") + "\x00" + strings.Join(reserved, "\x01")
+}
+
+// peek returns the cached scan if it is still fresh; it never scans.
+func (l *lister) peek(dir string, excl []string, ttl time.Duration, reserved []string) (*listing, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.c[listKey(dir, excl, reserved)]; ok && ttl > 0 && time.Since(e.at) < ttl {
+		return e.lst, true
+	}
+	return nil, false
+}
+
 // listing returns the cached scan if it is younger than ttl, else scans. Only
 // one scan per key runs at a time; concurrent callers share its result. No
 // lock is held while scanning, a failed scan is not cached, and the cache
 // entry is stamped when the scan finished.
 func (l *lister) listing(dir string, excl []string, ttl time.Duration, reserved []string) (*listing, error) {
-	key := dir + "\x00" + strings.Join(excl, "\x01") + "\x00" + strings.Join(reserved, "\x01")
+	key := listKey(dir, excl, reserved)
 	l.mu.Lock()
 	if ttl > 0 {
 		if e, ok := l.c[key]; ok && time.Since(e.at) < ttl {
@@ -333,6 +347,16 @@ type viewShared struct {
 	excl  []string
 	ttl   time.Duration
 	shard string // shared folder (as given, made absolute)
+	// statFn stats a real zip (Open, and Getattr when no fresh listing has
+	// it); tests count calls. Default os.Stat.
+	statFn func(string) (os.FileInfo, error)
+}
+
+func (v *viewShared) stat(p string) (os.FileInfo, error) {
+	if v.statFn != nil {
+		return v.statFn(p)
+	}
+	return os.Stat(p)
 }
 
 func (v *viewShared) logf(format string, a ...any) {
@@ -384,12 +408,25 @@ var (
 	_ = (fs.NodeLinker)((*viewDir)(nil))
 )
 
-func (d *viewDir) listing() (*listing, error) {
-	var reserved []string
+func (d *viewDir) reserved() []string {
 	if d.root {
-		reserved = []string{sharedName}
+		return []string{sharedName}
 	}
-	return d.v.ls.listing(d.path, d.v.excl, d.v.ttl, reserved)
+	return nil
+}
+
+func (d *viewDir) listing() (*listing, error) {
+	return d.v.ls.listing(d.path, d.v.excl, d.v.ttl, d.reserved())
+}
+
+// cachedEntry returns the entry shown under name from a fresh listing, without
+// touching the real directory.
+func (d *viewDir) cachedEntry(name string) (viewEntry, bool) {
+	lst, ok := d.v.ls.peek(d.path, d.v.excl, d.v.ttl, d.reserved())
+	if !ok {
+		return viewEntry{}, false
+	}
+	return lst.find(name)
 }
 
 func (d *viewDir) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) (errno syscall.Errno) {
@@ -477,7 +514,7 @@ func (d *viewDir) file(ctx context.Context, name, real string, shared bool, e vi
 		}
 	}
 	if vf == nil {
-		vf = &viewFile{v: d.v, name: name, real: real, shared: shared}
+		vf = &viewFile{v: d.v, parent: d, name: name, real: real, shared: shared}
 		ino = d.NewInode(ctx, vf, fs.StableAttr{Mode: fuse.S_IFREG})
 	}
 	size, mt := vf.listed(e)
@@ -515,6 +552,7 @@ func (d *viewDir) Link(ctx context.Context, target fs.InodeEmbedder, name string
 type viewFile struct {
 	fs.Inode
 	v      *viewShared
+	parent *viewDir // the directory listing that shows this file
 	name   string
 	real   string // zip path, or the shared folder
 	shared bool
@@ -582,7 +620,16 @@ func (f *viewFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		out.SetTimes(nil, &mt, nil)
 		return 0
 	}
-	st, err := os.Stat(f.real)
+	// A fresh listing already holds the zip's size and mtime: no stat of the
+	// real file (a CIFS round trip) per attribute request.
+	if f.parent != nil {
+		if e, ok := f.parent.cachedEntry(f.name); ok && !e.IsDir && e.Real == filepath.Base(f.real) {
+			out.Size = uint64(e.Size)
+			out.SetTimes(nil, &e.ModTime, nil)
+			return 0
+		}
+	}
+	st, err := f.v.stat(f.real)
 	if err != nil {
 		return errnoOf(err)
 	}
@@ -627,7 +674,7 @@ func (f *viewFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fl
 	f.built = h.size
 	if f.shared {
 		f.mtime = time.Now()
-	} else if st, err := os.Stat(f.real); err == nil {
+	} else if st, err := f.v.stat(f.real); err == nil {
 		f.mtime = st.ModTime()
 	}
 	f.mu.Unlock()

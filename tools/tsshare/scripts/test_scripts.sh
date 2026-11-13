@@ -426,6 +426,52 @@ expect "adopted: reported its mount" has "elsewhere"
 expect "adopted: the process was stopped" dead "$FP"
 expect "adopted: pid file removed" no_pidfile
 
+# a second tsshare of another mount: reported, not touched
+spare tsshare -mount "$T/e1"; F1=$FP
+spare tsshare -mount "$T/e2"; F2=$FP
+echo "$F1" > "$PIDFILE"
+check "stop with two daemons" 0 -- sh "$STOP"
+expect "two daemons: the pid file's one stopped" dead "$F1"
+expect "two daemons: the other one untouched" kill -0 "$F2"
+expect "two daemons: the other one is reported" has "Another tsshare runs at:"
+expect "two daemons: the report names its mount" has "e2"
+expect "two daemons: narrow" narrow
+kill -KILL "$F2" 2>/dev/null
+# a daemon that ignores TERM, found through the pid file with a mount that
+# is not the default: the escalation (TERM again, KILL, lazy unmount) must
+# act on the ADOPTED mount, and never on the default one. umount and
+# fusermount3 are logging stubs; MOUNTS_FILE says both mounts exist.
+mkdir -p "$T/stub"
+for c in umount fusermount3; do
+	printf '#!/bin/sh\necho "%s $*" >> "$T/stub.log"\nexit 0\n' "$c" > "$T/stub/$c"
+	chmod +x "$T/stub/$c"
+done
+: > "$T/stub.log"
+printf 'tsshare %s fuse.tsshare rw 0 0\ntsshare %s fuse.tsshare rw 0 0\n' "$T/adopted" "$T/defmnt" > "$T/mstub"
+"$T/fake2/tsshare" -c 'trap "" TERM; while :; do sleep 1; done' -mount "$T/adopted" &
+FP=$!
+HELPERS="$HELPERS $FP"
+echo "$FP" > "$PIDFILE"
+check "stop a TERM-ignoring daemon of another mount" 0 -- env PATH="$T/stub:$PATH" MOUNTS_FILE="$T/mstub" MOUNT="$T/defmnt" WAIT_SECS=2 sh "$STOP"
+expect "ignoring daemon: escalated to KILL" has "sending KILL"
+expect "ignoring daemon: lazy unmount tried" has "lazy unmount"
+expect "ignoring daemon: it is dead" dead "$FP"
+expect "ignoring daemon: lazy unmount hit the adopted mount" grep -q " $T/adopted\$" "$T/stub.log"
+expect "ignoring daemon: default mount never touched" test -z "$(grep "$T/defmnt" "$T/stub.log")"
+expect "ignoring daemon: pid file removed" no_pidfile
+kill -KILL "$FP" 2>/dev/null
+# a corrupt pid file: only the first 12 characters are ever printed
+G="$(printf 'g%.0s' $(seq 1 200))"
+echo "$G" > "$PIDFILE"
+check "stop with a 200-character garbage pid file" 0 -- sh "$STOP"
+expect "garbage pid: stale" has "stale"
+expect "garbage pid: narrow" narrow
+printf '%s\n%s\n' "$G" "$G" > "$PIDFILE"
+check "start with a two-line garbage pid file" 0 -- env MODE=single sh "$START" "$T/src"
+expect "garbage pid (start): stale" has "stale"
+expect "garbage pid (start): narrow" narrow
+sh "$STOP" > /dev/null 2>&1
+
 check "view: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/nozip" SHARED="$T/nozip/shared" MOUNT="$T/nozip/share" sh "$START"
 expect "view: missing ZIPROOT message" has "folder not found"
 expect "view: missing ZIPROOT created nothing" test ! -e "$T/nozip"

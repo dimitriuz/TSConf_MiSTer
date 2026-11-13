@@ -86,17 +86,6 @@ is_ours() {
 	}
 }
 
-# first pid in ps output that is our daemon (BusyBox or procps ps)
-scan_pid() {
-	for _c in $(ps w 2>/dev/null | grep tsshare | grep -v grep |
-		while read -r _x _r; do echo "$_x"; done); do
-		if is_ours "$_c"; then
-			echo "$_c"
-			return 0
-		fi
-	done
-	return 1
-}
 # the "-mount" value of a live process whose argv[0] basename is
 # tsshare (not this shell or its parent); empty if there is none
 ts_mount() {
@@ -121,8 +110,9 @@ ts_mount() {
 	}
 }
 
-# first process that is a tsshare daemon whatever its mount point
-# (scans /proc: a plain ps only lists some processes on some systems)
+# first process that is a tsshare daemon whatever its mount point,
+# other than pid $1 if given (scans /proc: a plain ps only lists some
+# processes on some systems)
 scan_any() {
 	for _c in $(grep -l tsshare /proc/[0-9]*/cmdline 2>/dev/null |
 		sed 's|^/proc/\([0-9]*\)/cmdline$|\1|'); do
@@ -131,6 +121,7 @@ scan_any() {
 		"$SCAN_PREFIX"*) ;;
 		*) continue ;;
 		esac
+		[ "$_c" != "$1" ] || continue
 		if [ -n "$(ts_mount "$_c")" ]; then
 			echo "$_c"
 			return 0
@@ -195,7 +186,7 @@ echo "it or reset the core first."
 # is stale and is never signalled.
 PID=""
 if [ -f "$PIDFILE" ]; then
-	P="$(cat "$PIDFILE" 2>/dev/null)"
+	P="$(head -n 1 "$PIDFILE" 2>/dev/null | cut -c1-12)"
 	if [ -n "$(ts_mount "$P")" ]; then
 		PID="$P"
 	else
@@ -210,6 +201,11 @@ if [ -n "$PID" ]; then
 		echo "Found the daemon mounted at:"
 		echo "  $(short "$M")"
 		MOUNT="$M"
+	fi
+	O="$(scan_any "$PID")"
+	if [ -n "$O" ]; then
+		echo "Another tsshare runs at: $(ts_mount "$O" |
+			sed 's/.*\(.\{31\}\)$/...\1/')" | cut -c1-60
 	fi
 fi
 

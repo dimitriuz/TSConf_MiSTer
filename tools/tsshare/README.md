@@ -10,12 +10,13 @@ names included.
 Why: large collections (10+ GB, tens of thousands of files, zips) live on a
 NAS the MiSTer already mounts. Copying them to the SD card or building an image
 by hand is slow and goes stale. With tsshare the "image" is built in memory
-from a scan of the tree (0.4 s for the real 57,353-file zip on the host; estimated
-2 to 4 s on the board, not yet measured, see the board test), and file data is read from the source
+from a scan of the tree (0.4 s for the real 57,353-file zip on the host; 16.5 s on the
+board, measured 2026-11-13, see docs/BOARD.md), and file data is read from the source
 only when the core asks for it. No change to Main_MiSTer, `sys/` or the RTL.
 
-Status: tested on the build host only. Nothing has been run on the board yet;
-see "Verified and not verified".
+Status: tested on the build host and, on 2026-11-13, on the owner's MiSTer with the
+real 1.4 GB zip (results in [docs/BOARD.md](docs/BOARD.md)); see "Verified and not
+verified" for what is still open.
 
 ## Quick start on the board
 
@@ -35,9 +36,9 @@ see "Verified and not verified".
    It mounts at `/media/fat/tsshare` and prints the geometry, the warning count
    and the OSD path when `share.vhd` is ready.
 3. Load the TSConf core, open the OSD, **Mount SD2 image**, go to `tsshare`,
-   pick `share.vhd`, then reset the core. Wild Commander shows the share as
-   drive 6 or as card #2, depending on the core's mapping (not yet seen on the
-   board).
+   pick `share` (the picker hides the `.vhd` extension), then reset the core.
+   Wild Commander shows the share as drive `6:\` (card #2, "SD2: Z-Controller"
+   in its device list); on the board test image 1 was the first panel's `1:\`.
 4. When done: eject the image in the OSD (or reset the core), then run
    `tsshare_stop.sh`.
 
@@ -239,19 +240,28 @@ tree; warm and cold read latency; memory figures above; the unit and FUSE
 tests; the start/stop scripts through `scripts/test_scripts.sh`
 (non-root, `fusermount3`).
 
+Verified on the owner's board (2026-11-13, details in [docs/BOARD.md](docs/BOARD.md)):
+the root `DirectMount` path works (`/proc/mounts` shows `fuse.tsshare`); the scripts
+run under BusyBox `ash`; start-up 16.5 s for the real zip, 43 to 47 MB peak RSS;
+the OSD picker reaches `/media/fat/tsshare` and mounts `share`; Wild Commander lists
+the whole tree with long names; a PT3 tune plays in the Wild Player plugin, the
+next track loads on Space and the player moves on to the next file by itself at
+the end of a tune; a `.trd` mounts and boots in TR-DOS; a write attempt from WC
+("make directory") fails cleanly with "Not Enough Space!"; stopping the daemon
+while the image is still mounted does not freeze the OSD or the core (WC then
+shows an empty directory); five files read through a Linux loop mount on the
+board matched the zip byte for byte.
+
 NOT verified on the board:
 
-- the root `DirectMount` path (the board has no `fusermount`); the code falls
-  back to `fusermount3` if the strict mount fails, which on the board will
-  simply fail;
-- that the OSD file picker reaches `/media/fat/tsshare` (the SD card root is
-  exFAT with some CIFS-mounted folders) and mounts `share.vhd`;
-- Wild Commander, players and TR-DOS reading the share; a write attempt from
-  WC onto the card;
-- speed and memory on the ARM Cortex-A9 and with a NAS-backed source;
-- the scripts under BusyBox `ash`, `ps` and `umount` (only checked against
-  `sh`/`dash` and `bash --posix`, no BusyBox or shellcheck on the host);
-- cluster sizes other than 4 KB and partitions other than at sector 128.
+- `.spg`, `.scl` and `.vgm` files, and names with non-Latin characters shown by WC
+  (checked byte for byte on the host and with a loop mount, not on screen);
+- long-running memory and CPU under heavy browsing (idle CPU was 0%, peak RSS 47 MB
+  after about 15 minutes of use);
+- a stalled NAS during a read;
+- cluster sizes other than 4 KB and partitions other than at sector 128;
+- the daemon's abort recipe with `tsshare` on the board (it was proven with the
+  spike daemon).
 
 ## Known limits
 

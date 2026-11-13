@@ -14,9 +14,9 @@ import (
 
 // zipSource serves the files of a zip archive.
 //
-// Time zones: Node.ModTime is built as time.Date(fields of Modified in UTC,
-// time.UTC), so Volume writes the entry's stored wall-clock fields (for an
-// entry with an extended timestamp, the UTC fields of that timestamp).
+// Time zones: Node.ModTime is built as time.Date(date and clock fields of
+// Modified as archive/zip returns them, time.UTC), so Volume writes the
+// entry's stored DOS wall-clock fields; an extended timestamp is ignored.
 type zipSource struct {
 	zpath  string
 	f      *os.File
@@ -92,11 +92,14 @@ func decodeCP437(s string) string {
 }
 
 func zipTime(t time.Time) time.Time {
-	t = t.UTC()
-	if t.IsZero() || t.Year() < 1980 { // an all-zero DOS time decodes to 1979-11-30
+	// Keep the fields as archive/zip returns them: the DOS wall clock (in a
+	// fixed zone when an extended timestamp is also present). No conversion.
+	y, mo, d := t.Date()
+	h, mi, sec := t.Clock()
+	if t.IsZero() || y < 1980 { // an all-zero DOS time decodes to 1979-11-30
 		return time.Time{}
 	}
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
+	return time.Date(y, mo, d, h, mi, sec, 0, time.UTC)
 }
 
 func (s *zipSource) Tree() (*Node, []string, error) {
@@ -295,7 +298,7 @@ type zipStream struct {
 	done   bool  // size reached and CRC verified
 }
 
-func (s *zipSource) readStream(id int, zf *zip.File, p []byte, off int64) (int, error) {
+func (s *zipSource) readStream(id int, zf *zip.File, p []byte, off int64) (total int, err error) {
 	s.smu.Lock()
 	st := s.streams[id]
 	if st == nil {
@@ -305,8 +308,18 @@ func (s *zipSource) readStream(id int, zf *zip.File, p []byte, off int64) (int, 
 	s.smu.Unlock()
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			if st.rc != nil {
+				st.rc.Close()
+				st.rc = nil
+			}
+			st.winLen = 0
+			err = fmt.Errorf("%s: %s: panic while inflating: %v", s.zpath, zf.Name, r)
+		}
+	}()
 	size := int64(zf.UncompressedSize64)
-	total := 0
+	total = 0
 	for total < len(p) {
 		cur := off + int64(total)
 		if st.winLen > 0 && cur >= st.winOff && cur < st.winOff+int64(st.winLen) {

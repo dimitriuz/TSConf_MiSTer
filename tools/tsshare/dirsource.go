@@ -17,8 +17,13 @@ type dirSource struct {
 	cache *fdCache
 }
 
-// NewDirSource scans root recursively. Symlinks to files are followed;
-// symlinked directories and unreadable entries are skipped with warnings.
+// NewDirSource scans root recursively. Symlinks to files are followed (a
+// warning only when broken); symlinked directories and entries whose Info
+// fails are skipped with warnings. Files are not opened at scan time, so a
+// file that cannot be opened shows up as an error when it is read.
+//
+// Reads are clamped to the size seen at scan time: a file that grew never
+// yields bytes beyond Size, and a file that shrank makes the read fail.
 func NewDirSource(root string, o SourceOptions) (Source, error) {
 	o = o.withDefaults()
 	st, err := os.Stat(root)
@@ -67,7 +72,6 @@ func (s *dirSource) Tree() (*Node, []string, error) {
 					warn("skipping symlinked directory %s", p)
 					continue
 				}
-				warn("following symlink %s", p)
 				info = ti
 			}
 			switch {
@@ -80,12 +84,6 @@ func (s *dirSource) Tree() (*Node, []string, error) {
 					warn("skipping %s: 4 GiB or larger", p)
 					continue
 				}
-				f, err := os.Open(p)
-				if err != nil {
-					warn("skipping unreadable file %s: %v", p, err)
-					continue
-				}
-				f.Close()
 				s.paths = append(s.paths, p)
 				n.Children = append(n.Children, &Node{
 					Name: e.Name(), Size: info.Size(),
@@ -110,6 +108,22 @@ func (s *dirSource) ReadFileAt(n *Node, p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	short := false
+	if off >= n.Size {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > n.Size-off {
+		p = p[:n.Size-off]
+		short = true
+	}
+	k, err := s.readClamped(n, p, off)
+	if err == nil && short {
+		err = io.EOF
+	}
+	return k, err
+}
+
+func (s *dirSource) readClamped(n *Node, p []byte, off int64) (int, error) {
 	e := s.cache.get(n.ID)
 	defer s.cache.put(e)
 	e.mu.Lock()

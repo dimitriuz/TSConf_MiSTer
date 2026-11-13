@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -120,34 +121,29 @@ func TestDirSourceTree(t *testing.T) {
 	writeFile(t, secret, []byte("x"))
 	os.Chmod(secret, 0)
 	defer os.Chmod(secret, 0o644)
-	unreadable := os.Geteuid() != 0 && func() bool {
-		f, err := os.Open(secret)
-		if err == nil {
-			f.Close()
-		}
-		return err != nil
-	}()
-
 	s, err := NewDirSource(root, SourceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	got, warns, _ := listTree(t, s)
-	want := []string{"a.txt:5", "link.txt:5", "realdir/", "sub/", "sub/c:0", "sub/deep/", "sub/deep/b.bin:3"}
-	if unreadable {
-		if !hasWarn(warns, "secret") {
-			t.Errorf("no warning for unreadable file: %v", warns)
-		}
-	} else {
-		want = append(want, "secret:1")
-		sort.Strings(want)
-	}
+	got, warns, tree := listTree(t, s)
+	want := []string{"a.txt:5", "link.txt:5", "realdir/", "secret:1", "sub/", "sub/c:0", "sub/deep/", "sub/deep/b.bin:3"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("tree = %v\nwant   %v", got, want)
 	}
 	if !hasWarn(warns, "linkdir") || !hasWarn(warns, "broken") {
 		t.Errorf("missing warnings: %v", warns)
+	}
+	if hasWarn(warns, "link.txt") {
+		t.Errorf("warning for a working file symlink: %v", warns)
+	}
+	// An unreadable file is listed; reading it fails (unless running as root)
+	// and everything else keeps working.
+	if _, err := readNode(t, s, findNode(tree, "secret"), 0, 1); err == nil && os.Geteuid() != 0 {
+		t.Error("unreadable file read without error")
+	}
+	if b, err := readNode(t, s, findNode(tree, "link.txt"), 0, 5); err != nil || string(b) != "hello" {
+		t.Errorf("link.txt = %q, %v", b, err)
 	}
 	for _, w := range warns {
 		if !strings.HasPrefix(w, root) {
@@ -189,6 +185,39 @@ func TestDirSourceReadAt(t *testing.T) {
 	}
 	if c := s.(*dirSource).cache.openCount(); c > 4 {
 		t.Errorf("%d descriptors cached, limit 4", c)
+	}
+}
+
+func TestDirSourceChangedFiles(t *testing.T) {
+	root := t.TempDir()
+	orig := randBytes(5, 300_000)
+	writeFile(t, filepath.Join(root, "shrink"), orig)
+	writeFile(t, filepath.Join(root, "grow"), orig[:100_000])
+	s, _ := NewDirSource(root, SourceOptions{})
+	defer s.Close()
+	_, _, tree := listTree(t, s)
+	// prime the windows, then change the files
+	readNode(t, s, findNode(tree, "grow"), 0, 10)
+	if err := os.WriteFile(filepath.Join(root, "grow"), append(append([]byte{}, orig[:100_000]...), orig[:50_000]...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(filepath.Join(root, "shrink"), 1000); err != nil {
+		t.Fatal(err)
+	}
+	g := findNode(tree, "grow")
+	buf := make([]byte, 200_000)
+	k, err := s.ReadFileAt(g, buf, 0)
+	if k != 100_000 || (err != nil && err != io.EOF) || !bytes.Equal(buf[:k], orig[:100_000]) {
+		t.Errorf("grown file: %d bytes, %v", k, err)
+	}
+	if k, err := s.ReadFileAt(g, buf, 100_000); k != 0 || err == nil {
+		t.Errorf("read past scanned size = %d, %v", k, err)
+	}
+	if _, err := readNode(t, s, findNode(tree, "shrink"), 0, 300_000); err == nil {
+		t.Error("shrunk file: read of the missing tail succeeded")
+	}
+	if _, err := readNode(t, s, findNode(tree, "shrink"), 200_000, 50_000); err == nil {
+		t.Error("shrunk file: read past new end succeeded")
 	}
 }
 
@@ -551,11 +580,20 @@ func TestZipTimes(t *testing.T) {
 	h.ModifiedTime = 7<<11 | 8<<5 | 10/2
 	w, _ := zw.CreateHeader(h)
 	w.Write([]byte("x"))
-	// Extended timestamp: the UTC wall-clock fields.
+	// Extended timestamp written by archive/zip: DOS fields are the wall clock
+	// of the given time in its own zone; those are the stored fields.
 	h = &zip.FileHeader{Name: "ext.txt", Method: zip.Store,
 		Modified: time.Date(2019, 12, 31, 23, 58, 56, 0, time.FixedZone("z", -3*3600))}
 	w, _ = zw.CreateHeader(h)
 	w.Write([]byte("y"))
+	// DOS time and the extended-timestamp (UT) field disagree: DOS wins.
+	ut := time.Date(2020, 6, 1, 10, 0, 0, 0, time.UTC).Unix()
+	h = &zip.FileHeader{Name: "both.txt", Method: zip.Store,
+		Extra: []byte{0x55, 0x54, 5, 0, 1, byte(ut), byte(ut >> 8), byte(ut >> 16), byte(ut >> 24)}}
+	h.ModifiedDate = uint16(2020-1980)<<9 | 6<<5 | 1
+	h.ModifiedTime = 12<<11 | 0<<5 | 0
+	w, _ = zw.CreateHeader(h)
+	w.Write([]byte("z"))
 	w, _ = zw.CreateHeader(&zip.FileHeader{Name: "dir/", Method: zip.Store})
 	_ = w
 	zw.Close()
@@ -574,7 +612,8 @@ func TestZipTimes(t *testing.T) {
 		}
 	}
 	chk("dos.txt", 2020, 5, 6, 7, 8, 10)
-	chk("ext.txt", 2020, 1, 1, 2, 58, 56) // 23:58:56 at UTC-3 is 02:58:56 UTC next day
+	chk("ext.txt", 2019, 12, 31, 23, 58, 56)
+	chk("both.txt", 2020, 6, 1, 12, 0, 0)
 	if !findNode(tree, "dir").ModTime.IsZero() {
 		t.Errorf("dir without time = %v", findNode(tree, "dir").ModTime)
 	}
@@ -593,6 +632,9 @@ func TestZipTimes(t *testing.T) {
 	}
 	if !regexp.MustCompile(`2020-05-06\s+7:08`).Match(out) {
 		t.Errorf("FAT listing lacks 2020-05-06 7:08:\n%s", out)
+	}
+	if !regexp.MustCompile(`BOTH\s+TXT\s+1\s+2020-06-01\s+12:00`).Match(out) {
+		t.Errorf("FAT listing lacks both.txt 2020-06-01 12:00 (DOS time, not UT):\n%s", out)
 	}
 }
 
@@ -645,4 +687,82 @@ func TestVolumeFromDirAndZip(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCacheLoadPanic(t *testing.T) {
+	c := newByteCache(1 << 20)
+	release := make(chan struct{})
+	errs := make(chan error, 6)
+	for i := 0; i < 5; i++ {
+		go func() {
+			_, err := c.get(1, func() ([]byte, error) { <-release; panic("boom") })
+			errs <- err
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // let the waiters queue up behind the leader
+	close(release)
+	for i := 0; i < 5; i++ {
+		select {
+		case err := <-errs:
+			if err == nil || !strings.Contains(err.Error(), "boom") {
+				t.Errorf("err = %v, want one mentioning the panic value", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a caller is blocked after the loader panicked")
+		}
+	}
+	d, err := c.get(1, func() ([]byte, error) { return []byte("ok"), nil })
+	if err != nil || string(d) != "ok" {
+		t.Errorf("retry = %q, %v", d, err)
+	}
+}
+
+func TestCacheLeaderFailureRetry(t *testing.T) {
+	c := newByteCache(1 << 20)
+	release := make(chan struct{})
+	errs := make(chan error, 4)
+	boom := errors.New("load failed")
+	for i := 0; i < 4; i++ {
+		go func() {
+			_, err := c.get(7, func() ([]byte, error) { <-release; return nil, boom })
+			errs <- err
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	for i := 0; i < 4; i++ {
+		if err := <-errs; !errors.Is(err, boom) {
+			t.Errorf("err = %v", err)
+		}
+	}
+	calls := 0
+	d, err := c.get(7, func() ([]byte, error) { calls++; return []byte("fine"), nil })
+	if err != nil || string(d) != "fine" || calls != 1 {
+		t.Errorf("retry = %q, %v, loader calls %d", d, err, calls)
+	}
+}
+
+func TestZipConcurrentStream(t *testing.T) {
+	s, data, tree, _ := zipFixture(t, 1)
+	defer s.Close()
+	n := findNode(tree, "d/big.deflat")
+	d := data["d/big.deflat"]
+	var wg sync.WaitGroup
+	for g := 0; g < 12; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(g)))
+			for k := 0; k < 12; k++ {
+				ln := 1 + r.Intn(50_000)
+				off := int64(r.Intn(len(d) - ln))
+				b, err := readNode(t, s, n, off, ln)
+				if err != nil || !bytes.Equal(b, d[off:off+int64(ln)]) {
+					t.Errorf("@%d+%d: %v", off, ln, err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/list"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -163,7 +164,16 @@ func (c *byteCache) get(id int, load func() ([]byte, error)) ([]byte, error) {
 	c.m[id] = e
 	c.mu.Unlock()
 
-	data, err := load()
+	var data []byte
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				data, err = nil, fmt.Errorf("tsshare: cache load panicked: %v", r)
+			}
+		}()
+		data, err = load()
+	}()
 
 	c.mu.Lock()
 	e.data, e.err = data, err

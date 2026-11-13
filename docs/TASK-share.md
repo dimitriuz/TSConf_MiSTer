@@ -1,6 +1,6 @@
 # Task: local share / zip as a source for TSConf over the ZiFi UART
 
-**Status: spike done (2026-11-13), proposal only. Do not start on your own.**
+**Status: BUILT AND BOARD-VERIFIED (2026-11-13). The FUSE virtual-FAT route is implemented as `tools/tsshare` (branch `tsshare`; results: `tools/tsshare/docs/BOARD.md`, `tools/tsshare/docs/PERF.md`). The text below is the spike-era analysis and rationale.**
 
 **Update after spike D (owner prefers NOT to alter Main_MiSTer):** the Minimig and ao486 shares are *not* virtual disks. Each is a filesystem RPC served by Main_MiSTer (`support/minimig/minimig_share.cpp`, ~930 lines; `support/x86/x86_share.cpp`, ~1200 lines) over a DDR mailbox (ARM mmaps `/dev/mem`: 8 KB at `0x27FF4000` for Minimig, `0x300CE000` for x86; the ARM polls a request word with a magic number and echoes an ack), with a guest-side driver on the Amiga/DOS side. The core-specific part in Main_MiSTer is tiny (an `is_minimig()` gate and a poll call). There is no generic mechanism for a core to trigger ARM code: UIO opcodes are ARM-initiated, `/dev/MiSTer_cmd` accepts only `fb_cmd`, `video_mode`, `load_core`, `screenshot`, `volume`, and `user_io_file_mount` mounts exactly one regular file (no folder, no zip). So a clean "folder as drive" needs a new `tsconf_share.cpp` in Main_MiSTer; without editing Main the realistic design is the same RPC-over-DDR-mailbox idea with a separate ARM daemon (option B below) or the UART daemon (option A).
 

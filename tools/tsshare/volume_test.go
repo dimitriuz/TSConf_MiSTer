@@ -411,3 +411,14 @@ func TestScaleMemory(t *testing.T) {
 	}
 	runtime.KeepAlive(v)
 }
+
+func TestGeometry(t *testing.T) {
+	v, _, err := NewVolume(newMemSource(map[string]memFile{"a.txt": {Size: 10}, "d/": {}}), VolumeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := v.Geometry()
+	if g.Files != 1 || g.Dirs != 2 || g.DiskBytes != v.Size() || g.PartStart != 128 || g.SectorsPerCluster == 0 {
+		t.Fatalf("geometry %+v", g)
+	}
+}

@@ -575,3 +575,18 @@ func (v *Volume) readPiece(p []byte, off int64) (int, error) {
 	zero(p[m:n])
 	return int(n), nil
 }
+
+// Geometry summarizes the layout of a Volume for the startup report.
+type Geometry struct {
+	SectorsPerCluster int
+	Clusters          uint32 // clusters of the data area
+	FATSectors        int64
+	PartStart         int64 // sector
+	Dirs, Files       int   // including the root directory
+	DiskBytes         int64
+}
+
+// Geometry reports the volume layout.
+func (v *Volume) Geometry() Geometry {
+	return Geometry{v.spc, v.totalClusters, v.fatSectors, v.partStart, len(v.dirs), len(v.files), v.size}
+}

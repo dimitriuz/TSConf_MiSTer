@@ -13,9 +13,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 func TestViewName(t *testing.T) {
@@ -804,5 +809,254 @@ func TestViewFlags(t *testing.T) {
 	}
 	if !strings.Contains(d.sb.String(), "view: shared folder "+sh) {
 		t.Errorf("startup lines:\n%s", d.sb)
+	}
+}
+
+// ---- fix round 1 ----
+
+func newTestView(t *testing.T, root, shared, mnt string, ttl time.Duration) (*viewDir, *Manager) {
+	t.Helper()
+	m := NewManager(ManagerOptions{NoTicker: true})
+	t.Cleanup(m.Close)
+	r := newViewRoot(ViewOptions{ZipRoot: root, Shared: shared, Mount: mnt, ListTTL: ttl}, m)
+	return r.(*viewDir), m
+}
+
+func TestViewListingScanOnce(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"a.zip", "b.zip", "c.zip"} {
+		writeZipFile(t, filepath.Join(root, n), aFiles)
+	}
+	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Second)
+	var scans atomic.Int32
+	orig := d.v.ls.scan
+	d.v.ls.scanFn = func(dir string, excl, res []string) ([]viewEntry, error) {
+		scans.Add(1)
+		time.Sleep(150 * time.Millisecond)
+		return orig(dir, excl, res)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, errno := d.Readdir(context.Background()); errno != 0 {
+				t.Errorf("readdir: %v", errno)
+			}
+			if _, err := d.listing(); err != nil {
+				t.Errorf("listing: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := scans.Load(); n != 1 {
+		t.Fatalf("%d scans for concurrent requests on a cold directory, want 1", n)
+	}
+	// a failing scan is shared too, and not cached
+	var fails atomic.Int32
+	d.v.ls.scanFn = func(string, []string, []string) ([]viewEntry, error) {
+		fails.Add(1)
+		time.Sleep(100 * time.Millisecond)
+		return nil, errors.New("injected")
+	}
+	d.v.ls.mu.Lock()
+	d.v.ls.c = nil
+	d.v.ls.mu.Unlock()
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); d.listing() }()
+	}
+	wg.Wait()
+	if fails.Load() != 1 {
+		t.Fatalf("%d failing scans, want 1", fails.Load())
+	}
+	d.listing()
+	if fails.Load() != 2 {
+		t.Fatalf("a failed scan was cached (%d)", fails.Load())
+	}
+}
+
+func TestViewListingSlowScan(t *testing.T) {
+	root := t.TempDir()
+	writeZipFile(t, filepath.Join(root, "a.zip"), aFiles)
+	ttl := 200 * time.Millisecond
+	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), ttl)
+	var scans atomic.Int32
+	orig := d.v.ls.scan
+	d.v.ls.scanFn = func(dir string, excl, res []string) ([]viewEntry, error) {
+		scans.Add(1)
+		time.Sleep(3 * ttl) // longer than the TTL
+		return orig(dir, excl, res)
+	}
+	for i := 0; i < 30; i++ {
+		lst, err := d.listing()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := lst.find("a.vhd"); !ok {
+			t.Fatal("a.vhd missing")
+		}
+	}
+	if n := scans.Load(); n != 1 {
+		t.Fatalf("%d scans; the cache entry must be stamped after the scan", n)
+	}
+	time.Sleep(ttl + 50*time.Millisecond)
+	d.listing()
+	if n := scans.Load(); n != 2 {
+		t.Fatalf("%d scans after expiry, want 2", n)
+	}
+}
+
+func TestViewLookupLarge(t *testing.T) {
+	root := t.TempDir()
+	const n = 20000
+	for i := 0; i < n; i++ {
+		f, err := os.Create(filepath.Join(root, fmt.Sprintf("game-%05d.zip", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Minute)
+	if _, errno := d.Readdir(context.Background()); errno != 0 {
+		t.Fatal(errno)
+	}
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		lst, err := d.listing()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, ok := lst.find(fmt.Sprintf("game-%05d.vhd", i))
+		if !ok || e.Real != fmt.Sprintf("game-%05d.zip", i) {
+			t.Fatalf("entry %d: %v %+v", i, ok, e)
+		}
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("%d lookups took %v", n, el)
+	}
+}
+
+func TestViewSharedMtime(t *testing.T) {
+	needFuse(t)
+	e := newViewEnv(t)
+	want, _ := os.Stat(e.shared)
+	st, err := os.Stat(e.p("shared.vhd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ModTime().Year() < 2000 || st.ModTime().Sub(want.ModTime()).Abs() > time.Second {
+		t.Fatalf("shared.vhd mtime %v, shared dir %v", st.ModTime(), want.ModTime())
+	}
+	if got := sharedMtime(filepath.Join(e.root, "nonexistent")); !got.Equal(fallbackMtime) {
+		t.Fatalf("fallback %v", got)
+	}
+}
+
+func TestViewNameLength(t *testing.T) {
+	stems := []string{
+		strings.Repeat("a", 251),
+		strings.Repeat("é", 125) + "b",  // 251 bytes
+		strings.Repeat("日", 83) + "ab",  // 251 bytes, 3-byte runes
+		strings.Repeat("😀", 62) + "abc", // 251 bytes, 4-byte runes
+		"x" + strings.Repeat("ё", 125),  // 251 bytes
+	}
+	for _, stem := range stems {
+		if len(stem) != 251 {
+			t.Fatalf("test stem is %d bytes", len(stem))
+		}
+		run := func() []string {
+			taken := map[string]bool{}
+			var names []string
+			for i := 0; i < 120; i++ {
+				zn := stem + ".zip"
+				if i%2 == 1 {
+					zn = stem + ".ZIP"
+				}
+				got, ok := viewName(zn, taken)
+				if !ok {
+					t.Fatalf("not shown: %q", zn)
+				}
+				if len(got) > 255 || !utf8.ValidString(got) || !strings.HasSuffix(got, ".vhd") {
+					t.Fatalf("bad name (%d bytes): %q", len(got), got)
+				}
+				names = append(names, got)
+			}
+			return names
+		}
+		a, b := run(), run()
+		seen := map[string]bool{}
+		for i, n := range a {
+			if n != b[i] {
+				t.Fatal("not deterministic")
+			}
+			if seen[strings.ToLower(n)] {
+				t.Fatalf("duplicate %q", n)
+			}
+			seen[strings.ToLower(n)] = true
+		}
+	}
+}
+
+func TestViewMountInShared(t *testing.T) {
+	needFuse(t)
+	root := t.TempDir()
+	sh := filepath.Join(root, "shared")
+	mnt := filepath.Join(sh, "m")
+	os.MkdirAll(mnt, 0o755)
+	for _, mt := range []string{mnt, sh} {
+		cmd := exec.Command(daemonBin, "-view", root, "-shared", sh, "-mount", mt)
+		var sb syncBuf
+		cmd.Stderr = &sb
+		err := cmd.Run()
+		if exitCode(err) != 2 || !strings.Contains(sb.String(), "-shared") {
+			t.Errorf("mount %s: exit %d\n%s", mt, exitCode(err), sb.String())
+		}
+	}
+}
+
+func TestViewDirectIOAndInterrupt(t *testing.T) {
+	root := t.TempDir()
+	zp := filepath.Join(root, "a.zip")
+	writeZipFile(t, zp, aFiles)
+	d, m := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Second)
+	f := &viewFile{v: d.v, name: "a.vhd", real: zp}
+	h, fl, errno := f.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	if fl&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Fatalf("open flags %#x lack FOPEN_DIRECT_IO", fl)
+	}
+	if vols, leased := m.Stats(); vols != 1 || leased != 1 {
+		t.Fatalf("stats %d %d", vols, leased)
+	}
+	f.Release(context.Background(), h)
+	f.Release(context.Background(), h) // twice is safe
+	if _, leased := m.Stats(); leased != 0 {
+		t.Fatalf("lease leaked: %d", leased)
+	}
+	// a cancelled request gives EINTR and no lease
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, errno := f.Open(ctx, syscall.O_RDONLY); errno != syscall.EINTR {
+		t.Fatalf("cancelled open: %v", errno)
+	}
+	// an interrupt during a slow build abandons the wait and leaves nothing leased
+	m2 := NewManager(ManagerOptions{NoTicker: true, OnBuild: func(SourceSpec) { time.Sleep(300 * time.Millisecond) }})
+	defer m2.Close()
+	f2 := &viewFile{v: &viewShared{m: m2}, name: "a.vhd", real: zp}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, _, errno := f2.Open(ctx2, syscall.O_RDONLY); errno != syscall.EINTR {
+		t.Fatalf("interrupted open: %v", errno)
+	}
+	time.Sleep(450 * time.Millisecond)
+	if _, leased := m2.Stats(); leased != 0 {
+		t.Fatalf("lease after interrupted open: %d", leased)
+	}
+	// a write open is refused
+	if _, _, errno := f.Open(context.Background(), syscall.O_RDWR); errno != syscall.EROFS {
+		t.Fatalf("O_RDWR: %v", errno)
 	}
 }

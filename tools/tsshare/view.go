@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -66,10 +67,35 @@ func viewName(zipName string, taken map[string]bool) (string, bool) {
 	}
 	name := base + ".vhd"
 	for n := 2; taken[strings.ToLower(name)]; n++ {
-		name = base + " (" + strconv.Itoa(n) + ").vhd"
+		suffix := " (" + strconv.Itoa(n) + ").vhd"
+		name = cutUTF8(base, maxNameBytes-len(suffix)) + suffix
 	}
 	taken[strings.ToLower(name)] = true
 	return name, true
+}
+
+// maxNameBytes is the longest name FUSE and Linux accept.
+const maxNameBytes = 255
+
+// cutUTF8 shortens s to at most n bytes, on a UTF-8 boundary.
+func cutUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+var fallbackMtime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// sharedMtime is the mtime of the shared folder, or a fixed date.
+func sharedMtime(p string) time.Time {
+	if st, err := os.Stat(p); err == nil {
+		return st.ModTime()
+	}
+	return fallbackMtime
 }
 
 // resolvePath returns the absolute path with symlinks resolved, or just the
@@ -85,17 +111,49 @@ func resolvePath(p string) string {
 	return a
 }
 
-type listCacheEnt struct {
-	at      time.Time
+// listing is one scanned directory: the entries in order and a name index.
+type listing struct {
 	entries []viewEntry
+	byName  map[string]int
+}
+
+func newListing(es []viewEntry) *listing {
+	l := &listing{entries: es, byName: make(map[string]int, len(es))}
+	for i, e := range es {
+		l.byName[e.Name] = i
+	}
+	return l
+}
+
+// find returns the entry shown under name.
+func (l *listing) find(name string) (viewEntry, bool) {
+	i, ok := l.byName[name]
+	if !ok {
+		return viewEntry{}, false
+	}
+	return l.entries[i], true
+}
+
+type listCacheEnt struct {
+	at  time.Time // when the scan finished
+	lst *listing
+}
+
+// flight is a scan in progress; waiters get its result.
+type flight struct {
+	done chan struct{}
+	lst  *listing
+	err  error
 }
 
 // lister reads and caches mirrored directory listings.
 type lister struct {
-	logf func(string, ...any)
-	mu   sync.Mutex
-	c    map[string]listCacheEnt
-	seen map[string]bool // skip warnings already logged
+	logf   func(string, ...any)
+	scanFn func(dir string, excl, reserved []string) ([]viewEntry, error) // default scan; tests inject
+	mu     sync.Mutex
+	c      map[string]listCacheEnt
+	fl     map[string]*flight
+	seen   map[string]bool // skip warnings already logged
 }
 
 var defaultLister = &lister{}
@@ -129,36 +187,73 @@ func (l *lister) warn(dir, name, why string) {
 }
 
 func (l *lister) list(dir string, excl []string, ttl time.Duration, reserved []string) ([]viewEntry, error) {
-	key := dir + "\x00" + strings.Join(excl, "\x01") + "\x00" + strings.Join(reserved, "\x01")
-	now := time.Now()
-	if ttl > 0 {
-		l.mu.Lock()
-		if e, ok := l.c[key]; ok && now.Sub(e.at) < ttl {
-			l.mu.Unlock()
-			return e.entries, nil
-		}
-		l.mu.Unlock()
-	}
-	res, err := l.scan(dir, excl, reserved)
+	lst, err := l.listing(dir, excl, ttl, reserved)
 	if err != nil {
 		return nil, err
 	}
+	return lst.entries, nil
+}
+
+// listing returns the cached scan if it is younger than ttl, else scans. Only
+// one scan per key runs at a time; concurrent callers share its result. No
+// lock is held while scanning, a failed scan is not cached, and the cache
+// entry is stamped when the scan finished.
+func (l *lister) listing(dir string, excl []string, ttl time.Duration, reserved []string) (*listing, error) {
+	key := dir + "\x00" + strings.Join(excl, "\x01") + "\x00" + strings.Join(reserved, "\x01")
+	l.mu.Lock()
 	if ttl > 0 {
-		l.mu.Lock()
-		if l.c == nil || len(l.c) >= maxListCache {
-			for k, e := range l.c {
-				if now.Sub(e.at) >= ttl {
-					delete(l.c, k)
-				}
-			}
-			if l.c == nil || len(l.c) >= maxListCache {
-				l.c = map[string]listCacheEnt{}
-			}
+		if e, ok := l.c[key]; ok && time.Since(e.at) < ttl {
+			l.mu.Unlock()
+			return e.lst, nil
 		}
-		l.c[key] = listCacheEnt{at: now, entries: res}
-		l.mu.Unlock()
 	}
-	return res, nil
+	if f := l.fl[key]; f != nil {
+		l.mu.Unlock()
+		<-f.done
+		return f.lst, f.err
+	}
+	f := &flight{done: make(chan struct{})}
+	if l.fl == nil {
+		l.fl = map[string]*flight{}
+	}
+	l.fl[key] = f
+	l.mu.Unlock()
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.err = fmt.Errorf("panic scanning %s: %v", dir, r)
+			}
+			l.mu.Lock()
+			delete(l.fl, key)
+			if f.err == nil && ttl > 0 {
+				now := time.Now()
+				if l.c == nil || len(l.c) >= maxListCache {
+					for k, e := range l.c {
+						if now.Sub(e.at) >= ttl {
+							delete(l.c, k)
+						}
+					}
+					if l.c == nil || len(l.c) >= maxListCache {
+						l.c = map[string]listCacheEnt{}
+					}
+				}
+				l.c[key] = listCacheEnt{at: now, lst: f.lst}
+			}
+			l.mu.Unlock()
+			close(f.done)
+		}()
+		scan := l.scan
+		if l.scanFn != nil {
+			scan = l.scanFn
+		}
+		var es []viewEntry
+		es, f.err = scan(dir, excl, reserved)
+		if f.err == nil {
+			f.lst = newListing(es)
+		}
+	}()
+	return f.lst, f.err
 }
 
 func (l *lister) scan(dir string, excl []string, reserved []string) ([]viewEntry, error) {
@@ -289,12 +384,12 @@ var (
 	_ = (fs.NodeLinker)((*viewDir)(nil))
 )
 
-func (d *viewDir) entries() ([]viewEntry, error) {
+func (d *viewDir) listing() (*listing, error) {
 	var reserved []string
 	if d.root {
 		reserved = []string{sharedName}
 	}
-	return d.v.ls.list(d.path, d.v.excl, d.v.ttl, reserved)
+	return d.v.ls.listing(d.path, d.v.excl, d.v.ttl, reserved)
 }
 
 func (d *viewDir) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) (errno syscall.Errno) {
@@ -317,11 +412,12 @@ func (d *viewDir) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttr
 
 func (d *viewDir) Readdir(ctx context.Context) (ds fs.DirStream, errno syscall.Errno) {
 	defer guard("readdir", &errno)
-	es, err := d.entries()
+	lst, err := d.listing()
 	if err != nil {
 		d.v.logf("view: readdir failed: %v", err)
 		return nil, errnoOf(err)
 	}
+	es := lst.entries
 	list := make([]fuse.DirEntry, 0, len(es)+1)
 	for _, e := range es {
 		mode := uint32(fuse.S_IFREG)
@@ -339,17 +435,14 @@ func (d *viewDir) Readdir(ctx context.Context) (ds fs.DirStream, errno syscall.E
 func (d *viewDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (ch *fs.Inode, errno syscall.Errno) {
 	defer guard("lookup", &errno)
 	if d.root && name == sharedName {
-		return d.file(ctx, name, d.v.shard, true, viewEntry{Name: sharedName}, out), 0
+		return d.file(ctx, name, d.v.shard, true, viewEntry{Name: sharedName, ModTime: sharedMtime(d.v.shard)}, out), 0
 	}
-	es, err := d.entries()
+	lst, err := d.listing()
 	if err != nil {
 		d.v.logf("view: lookup failed: %v", err)
 		return nil, errnoOf(err)
 	}
-	for _, e := range es {
-		if e.Name != name {
-			continue
-		}
+	if e, ok := lst.find(name); ok {
 		if e.IsDir {
 			p := filepath.Join(d.path, e.Real)
 			if c := d.GetChild(name); c != nil {
@@ -456,7 +549,11 @@ func (f *viewFile) listed(e viewEntry) (int64, time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.opens > 0 || f.shared {
-		return f.built, f.mtime
+		mt := f.mtime
+		if mt.IsZero() {
+			mt = e.ModTime
+		}
+		return f.built, mt
 	}
 	return e.Size, e.ModTime
 }
@@ -479,6 +576,9 @@ func (f *viewFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		out.Size = uint64(f.built)
 		mt := f.mtime
 		f.mu.Unlock()
+		if mt.IsZero() {
+			mt = sharedMtime(f.real)
+		}
 		out.SetTimes(nil, &mt, nil)
 		return 0
 	}
@@ -608,6 +708,10 @@ func runView(sd *shutdown, c viewConfig) {
 		fmt.Fprintf(os.Stderr, "view: created shared folder %s\n", c.shared)
 	} else if st, _ := os.Stat(c.shared); !st.IsDir() {
 		fatal("bad -shared %s: not a directory", c.shared)
+	}
+
+	if rm, rs := resolvePath(c.mount), resolvePath(c.shared); rm == rs || strings.HasPrefix(rm, rs+string(filepath.Separator)) {
+		fatal("-mount %s lies inside the -shared folder %s; the shared disk would contain its own mount", c.mount, c.shared)
 	}
 
 	var rl *readLog

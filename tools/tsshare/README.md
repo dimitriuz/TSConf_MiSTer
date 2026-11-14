@@ -17,10 +17,9 @@ from a scan of the tree (0.4 s for the real 57,353-file zip on the host; 16.5 s 
 board, measured 2026-11-13, see docs/BOARD.md), and file data is read from the source
 only when the core asks for it. No change to Main_MiSTer, `sys/` or the RTL.
 
-Status: single mode is tested on the build host and, on 2026-11-13, on the owner's
-MiSTer with the real 1.4 GB zip (results in [docs/BOARD.md](docs/BOARD.md)). View
-mode is built and tested on the host only; the board test is pending. See
-"Verified and not verified".
+Status: single mode and view mode are both tested on the build host and on the
+owner's MiSTer with the real 1.4 GB zip (2026-11-13 and 2026-11-14, results in
+[docs/BOARD.md](docs/BOARD.md)). See "Verified and not verified".
 
 ## Quick start on the board (view mode)
 
@@ -63,11 +62,30 @@ otherwise, it creates only `shared` and `share` inside it).
    `Found the daemon mounted at:` when that mount differs from its default.
    It unmounts only a `fuse.tsshare` mount at exactly the daemon's `-mount`.
 
-Not known yet, to be checked in the board test: after a core reload, does
-Main_MiSTer re-mount the remembered `share/...vhd` image by itself, and what
-happens when the daemon is not running at that moment (the path is then an
-empty directory)? Until that is tested, start the daemon before loading the
-core and expect to select the image again.
+### Using the shares (what you do day to day)
+
+- **Start once** (Scripts menu, `tsshare_start.sh`) and leave it running. Putting
+  new zips under `games/TSConf` needs no restart: the picker lists the folder
+  live, and a zip is only scanned when you pick it.
+- **Pick a source:** OSD, **Mount SD2 image**, folder `share`, then `<zip name>`
+  (the picker hides `.vhd`) or `shared`. The first pick of a big zip pauses the
+  OSD for about 10 s (1.4 GB, 57,353 files, measured on the board); later picks
+  of the same zip are instant while it stays cached (10 minutes idle, then it is
+  released). `shared` (the folder `games/TSConf/shared`) is rescanned on every
+  pick, so drop files into that folder and pick it again to see them.
+- **Use it in Wild Commander:** `Alt+F2` (right panel) or `Alt+F1` (left), choose
+  `SD2: Z-Controller`. Browse, open `.trd` disks, play tunes. Everything is
+  read-only: a write ends with "Not Enough Space!".
+- **Switch sources** by picking another `.vhd` in the same OSD entry; the previous
+  one is closed. At most 2 volumes stay alive (`-max-volumes`).
+- **After a core reload** the OSD remembers the last SD2 image. If the daemon is
+  running at that moment, the core mounts it again by itself (a zip that is no
+  longer cached is rebuilt, about 10 s). If the daemon is not running, SD2 stays
+  empty (Wild Commander says "Device Not Found!"); nothing hangs. Start the daemon
+  and pick the image again.
+- **Stop:** reset the core or load another core first, then `tsshare_stop.sh`
+  (1-2 s). With an image still mounted it takes about 15 s, because the first
+  TERM cannot unmount a busy mount and the script has to send a second one.
 
 ### Single mode (the alternative)
 
@@ -356,15 +374,22 @@ tree; warm and cold read latency; memory figures above; the unit and FUSE
 tests; the start/stop scripts through `scripts/test_scripts.sh`
 (non-root, `fusermount3`).
 
-View mode (host only): the Go unit and FUSE tests, and a script dry run
+View mode on the host: the Go unit and FUSE tests, and a script dry run
 (`scripts/test_scripts.sh`: start, `shared.vhd` and `<name>.vhd` present, no entry
 containing `.zip`, second start refused, stop unmounts, a missing zip root
-refused). It is NOT verified on the board yet. The board test will check: that the
-OSD picker lists the `share` folder and the `.vhd` names and mounts one; that Wild
-Commander reads a zip volume and `shared.vhd`; the first-open pause (17 s was
-measured for single mode); the idle release after 10 minutes; the 2-volume limit
-(`-max-volumes`) and memory in view mode; the view over the NAS-backed `games/TSConf`; the start and
-stop scripts under BusyBox with the new defaults.
+refused).
+
+View mode on the owner's board (2026-11-14, details in [docs/BOARD.md](docs/BOARD.md)):
+the picker lists `share` and the `.vhd` names; the 1.4 GB zip builds in 10 s on the
+first pick and Wild Commander lists it and plays a MOD from it; `shared.vhd`
+builds in milliseconds and shows its files; switching zip -> `shared` -> zip and
+back works (the zip is reused from the cache, no rebuild) and reads still work;
+peak daemon RSS 43.7 MB with both volumes alive; a write attempt fails with "Not
+Enough Space!"; stop with an image mounted takes about 15 s and is clean; after a
+core reload the remembered SD2 image is re-mounted when the daemon is running and
+stays empty (no hang) when it is not. Not measured on the board: the 10-minute
+idle release, picker listing time with many zips, and the `-max-volumes` limit
+with a third source.
 
 Verified on the owner's board (2026-11-13, single mode, details in [docs/BOARD.md](docs/BOARD.md)):
 the root `DirectMount` path works (`/proc/mounts` shows `fuse.tsshare`); the scripts

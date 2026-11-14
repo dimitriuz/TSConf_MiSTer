@@ -95,12 +95,20 @@ Setup: `ZIPROOT=/media/fat/games/Spectrum/compilations/AAA` (`games/TSConf` hold
    re-mounted), image 1 loaded normally, `share/` was an empty plain directory; no hang. WC showed `Device Not Found!` for the
    right panel, which is the expected message for an empty card 2.
 
+## Switch test, second run (2026-11-14, 08:38-08:42)
+1. Core reload with the daemon already running: the remembered SD2 path was mounted again by itself (log: zip build at
+   08:38:24, 10.3 s, no key pressed). Reloading with the daemon down (first run) left SD2 empty.
+2. Picked image 1 (core resets): SD2 stayed the zip, no second build.
+3. SD2 -> `shared`: 8 ms build, WC showed `hello.txt`. Daemon RSS 43.7 MB.
+4. SD2 -> `SD` again: no new build line (the cached zip volume was reused), WC showed the zip root, folders opened, and a MOD
+   played in the Sound Player. Board `free` 254 MB, daemon `VmHWM` 43.7 MB with both volumes alive.
+5. Return to the menu core and `tsshare_stop.sh`: 1.5 s, clean (`got terminated`, both volumes `manager closed`).
+The first run's "switch back" did not land on the zip because of keys sent while the WC device dialog was open; it was a
+test mistake, not a daemon fault.
+
 ## Not verified
-- Switching **back** from `shared.vhd` to the zip: my third pick did not land on the zip (the log shows `shared` rescanned at
-  08:10:44, no second SD build), and WC showed a stale listing, so "pick another source and back" stayed open; likewise the
-  1-vs-2-volumes memory figure and whether closing the zip image drops its cache (no log line).
-- Picker listing time with many zips, first-open pause on the OSD (not timed separately; the OSD stayed responsive and the
-  pick finished within ~10 s), odd file names, EINTR paths.
+The 10-minute idle release, picker listing time with many zips, a third source against `-max-volumes`, odd file names,
+EINTR paths.
 
 ## Process notes
 - Companion Remote keeps a key held only while the same WebSocket connection is open, so `mister_remote.py raw` with a

@@ -68,3 +68,46 @@ the `fusectl` mount; the daemon binary, the log and the two scripts were left in
 ## Not checked
 `.spg`, `.scl` and `.vgm` on the board; non-Latin names on screen; a stalled NAS; long-running load; cluster
 sizes other than 4 KB; the abort recipe with `tsshare`.
+
+# View mode on the board (2026-11-14)
+
+Binary: HEAD b10a5b7 static ARM build (md5 `cd7dfb17…`), scripts from the same commit. Board idle (`MENU`) before and after.
+Setup: `ZIPROOT=/media/fat/games/Spectrum/compilations/AAA` (`games/TSConf` holds no zips), `SHARED=/media/fat/games/TSConf/shared`
+(the script created `share/` and `shared/`; the owner had approved that), core `TSConf_dualsd_20261113`, image 1 a copy of
+`vhd-example.vhd`. Driven with the Companion Remote and the `/dev/video4` capture.
+
+## Results
+1. **Start:** the script reported ready in 1 s. `share/` showed `SD.vhd`, `shared.vhd` (0 bytes until first opened) and
+   the zip folder's own subfolder `disks`; no raw `.zip` entries.
+2. **Picker:** in the OSD, `Mount SD2 image` opens in `games/TSConf` and lists `share` and `shared`; inside `share/` it lists
+   `disks`, `SD`, `shared` (the `.vhd` suffix is hidden by the picker).
+3. **Big zip (1.4 GB, 57,353 files):** the first pick built the volume in 10.2 s (log: 58,387 nodes, 0 warnings), faster than
+   the 17 s of single mode. Wild Commander (Alt+F2, `SD2: Z-Controller`) listed the zip root at once, opened
+   `9_Music_tracker format\5.1_Mod_music_tarcks` and the Sound Player played `1.1loadersong.mod`.
+4. **Switch to `shared.vhd`:** built in 9 ms, WC showed `hello.txt` (a file put there for the test). A later re-pick rebuilt it
+   ("close ... replaced", "directory rescan", 8 ms), so the folder is rescanned on each open.
+5. **Memory:** daemon `VmHWM` 43.6 MB after the 1.4 GB zip build and after switching to `shared`; board `free` 253 MB at that
+   point (82 MB used). Two volumes were never alive at once in this run.
+6. **Write attempt:** WC make-directory on the card gave `Not Enough Space!`; nothing changed, the core kept running.
+7. **Stop with the image mounted:** `tsshare_stop.sh` warned, first TERM hit `unmount: device or resource busy`, the second TERM
+   ended the daemon (15 s total, exit 0, no mount left, memory back to 45 MB used). The board stayed responsive.
+8. **Remembered path, daemon down:** reloading the core with the daemon stopped left SD2 unmounted (the picker path is not
+   re-mounted), image 1 loaded normally, `share/` was an empty plain directory; no hang. WC showed `Device Not Found!` for the
+   right panel, which is the expected message for an empty card 2.
+
+## Not verified
+- Switching **back** from `shared.vhd` to the zip: my third pick did not land on the zip (the log shows `shared` rescanned at
+  08:10:44, no second SD build), and WC showed a stale listing, so "pick another source and back" stayed open; likewise the
+  1-vs-2-volumes memory figure and whether closing the zip image drops its cache (no log line).
+- Picker listing time with many zips, first-open pause on the OSD (not timed separately; the OSD stayed responsive and the
+  pick finished within ~10 s), odd file names, EINTR paths.
+
+## Process notes
+- Companion Remote keeps a key held only while the same WebSocket connection is open, so `mister_remote.py raw` with a
+  separate `down`/`up` per call loses the modifier. For Alt+F2 send down/down/up/up on one connection.
+- WC's "Select Device" dialog stays open when the OSD is closed: arrow keys sent for the OSD then move its cursor. Screenshot
+  before each Enter.
+
+## Cleanup
+Core set back to `menu.rbf` (`/tmp/CORENAME` = `MENU`); removed `hello.txt`, the image copy on the NAS and the test mount;
+the daemon (new build), the log, the scripts and the empty `games/TSConf/share` and `shared` directories were left.

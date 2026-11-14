@@ -64,9 +64,10 @@ otherwise, it creates only `shared` and `share` inside it).
 
 ### Using the shares (what you do day to day)
 
-- **Start once** (Scripts menu, `tsshare_start.sh`) and leave it running. Putting
-  new zips under `games/TSConf` needs no restart: the picker lists the folder
-  live, and a zip is only scanned when you pick it.
+- **Start once** (Scripts menu, `tsshare_start.sh`) and leave it running. A zip
+  is only scanned when you pick it, and the folder listing is read from disk by
+  the daemon each time (new zips should appear without a restart; not tried on
+  the board).
 - **Pick a source:** OSD, **Mount SD2 image**, folder `share`, then `<zip name>`
   (the picker hides `.vhd`) or `shared`. The first pick of a big zip pauses the
   OSD for about 10 s (1.4 GB, 57,353 files, measured on the board); later picks

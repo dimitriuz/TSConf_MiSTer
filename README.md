@@ -75,6 +75,20 @@ If everything is done right, Wild Commander will start and let you choose your d
 A small [example](releases/vhd-example.zip) VHD with preinstalled Wild Commander is included in the release.
 
 
+## Sharing a zip or a folder as card #2
+
+The optional [tsshare](tools/tsshare/README.md) daemon (a small static ARM binary, no change to Main_MiSTer or the core)
+turns a large zip or a folder on your NAS into a read-only virtual SD card, without copying anything to the SD card:
+
+1. Run `tsshare_start.sh` from the MiSTer Scripts menu. Zips under `games/TSConf` appear as `<name>.vhd`
+   and the folder `games/TSConf/shared` as `shared.vhd`, inside `games/TSConf/share`.
+2. In the TSConf OSD choose **Mount SD2 image**, open `share` and pick one. Wild Commander shows it as the SD2 drive
+   (`Alt+F1` / `Alt+F2`, `SD2: Z-Controller`).
+
+A zip with tens of thousands of files opens in about 10 s on the board and the daemon stays under 50 MB.
+Install, usage, limits and results: [tools/tsshare/README.md](tools/tsshare/README.md).
+
+
 ## PS/2 keyboard mapping
 
 Letters `A`–`Z`, digits `0`–`9`, `Enter`, and `Space` map directly to the corresponding ZX Spectrum keys. The remaining mapped PS/2 keys are:

@@ -4,7 +4,7 @@
 TSConf core's second SD slot. It is a static Go daemon that mounts a FUSE
 filesystem next to your games. The default is **view mode**: the mount shows the
 folders under `games/TSConf`, every zip as `<name>.vhd` (so `SD.zip` is `SD.vhd`),
-and `shared.vhd`, a disk built from the folder `games/TSConf/shared`. Main_MiSTer
+and `share.vhd`, a disk built from the folder `games/TSConf/share`. (`share` is a real folder you put files in; the mount itself is a separate, empty folder `games/TSConf/virtualfs`, see "The two folders".) Main_MiSTer
 mounts one of these files as "SD2 image", and the core sees a disk with an MBR and
 one FAT32 partition holding the zip's (or folder's) files: Wild Commander lists it
 like any drive, long names included. The older **single mode** (`MODE=single`)
@@ -26,7 +26,7 @@ owner's MiSTer with the real 1.4 GB zip (2026-11-13 and 2026-11-14, results in
 Requirements: the dual-VHD core build (the TSConf core with a second SD slot,
 for example `TSConf_dualsd_20261113`) is needed for "Mount SD2 image"; and the
 folder `/media/fat/games/TSConf` must already exist (the start script refuses
-otherwise, it creates only `shared` and `share` inside it).
+otherwise, it creates only `share` and `virtualfs` inside it).
 
 1. Copy three files to the SD card (the layout follows the Companion Remote
    daemon, `Scripts/.config/<name>/`):
@@ -39,21 +39,21 @@ otherwise, it creates only `shared` and `share` inside it).
 
 2. In the Scripts menu run `tsshare_start.sh`. It views `ZIPROOT`
    (`/media/fat/games/TSConf`), serves the folder `SHARED`
-   (`/media/fat/games/TSConf/shared`; by default `$ZIPROOT/shared`) as `shared.vhd`, and mounts at `MOUNT`
-   (`/media/fat/games/TSConf/share`). It creates `shared` and `share` if they are
+   (`/media/fat/games/TSConf/share`, a real folder; by default `$ZIPROOT/share`) as `share.vhd`, and mounts at `MOUNT`
+   (`/media/fat/games/TSConf/virtualfs`). It creates `share` and `virtualfs` if they are
    missing (one line each) and prints `View ready: pick in the OSD` after about a
    second: the daemon scans nothing at start. From a shell you can pass another
    zip root, which replaces `ZIPROOT`: `sh /media/fat/Scripts/tsshare_start.sh
-   /path/to/root`. `SHARED` then defaults to `/path/to/root/shared`, but the
-   default `MOUNT` stays `/media/fat/games/TSConf/share` unless you give it. All
+   /path/to/root`. `SHARED` then defaults to `/path/to/root/share`, but the
+   default `MOUNT` stays `/media/fat/games/TSConf/virtualfs` unless you give it. All
    three paths must be absolute. The script checks them (and that `MOUNT` is not
    inside `SHARED`, `SHARED` not inside `MOUNT`, `ZIPROOT` not inside `MOUNT`)
    before it creates anything. If `MOUNT` already holds files it prints
    `Note: files in MOUNT are hidden while mounted` and goes on.
 3. Load the TSConf core, open the OSD, **Mount SD2 image**. The picker starts in
-   `games/TSConf` and its folder tree mirrors that folder: go into `share` and pick
+   `games/TSConf` and its folder tree mirrors that folder: go into `virtualfs` and pick
    `<zip name>.vhd` (a zip in a subfolder appears under the same subfolder) or
-   `shared.vhd`, then reset the core. Wild Commander shows the disk as the SD2
+   `share.vhd`, then reset the core. Wild Commander shows the disk as the SD2
    card (in the single-mode board test it was `6:\`).
 4. When done: eject the image in the OSD (or reset the core), then run
    `tsshare_stop.sh`. It finds the daemon by its own command line (the pid
@@ -62,17 +62,30 @@ otherwise, it creates only `shared` and `share` inside it).
    `Found the daemon mounted at:` when that mount differs from its default.
    It unmounts only a `fuse.tsshare` mount at exactly the daemon's `-mount`.
 
+### The two folders (read this first)
+
+Both live in `games/TSConf`, and only the first one is yours:
+
+| Folder | What it is | What you do with it |
+| --- | --- | --- |
+| `share` | A **real folder**. | Put loose files in it. Its content becomes one virtual card, listed as `share`. |
+| `virtualfs` | A **window**, an empty directory that the daemon mounts a virtual folder over while it runs. Nothing is stored in it. | Only open it in the OSD. It lists a card for every zip under `games/TSConf` (by the zip's name) plus `share`. |
+
+The OSD picker cannot pick a `.zip` by itself (Main_MiSTer shows every zip as a
+folder), which is why zips are offered as cards inside `virtualfs`. The OSD path is
+always **Mount SD2 image > virtualfs > (a zip name, or `share`)**.
+
 ### Using the shares (what you do day to day)
 
 - **Start once** (Scripts menu, `tsshare_start.sh`) and leave it running. A zip
   is only scanned when you pick it, and the folder listing is read from disk by
   the daemon each time (new zips should appear without a restart; not tried on
   the board).
-- **Pick a source:** OSD, **Mount SD2 image**, folder `share`, then `<zip name>`
-  (the picker hides `.vhd`) or `shared`. The first pick of a big zip pauses the
+- **Pick a source:** OSD, **Mount SD2 image**, folder `virtualfs`, then `<zip name>`
+  (the picker hides `.vhd`) or `share`. The first pick of a big zip pauses the
   OSD for about 10 s (1.4 GB, 57,353 files, measured on the board); later picks
   of the same zip are instant while it stays cached (10 minutes idle, then it is
-  released). `shared` (the folder `games/TSConf/shared`) is rescanned on every
+  released). `share` (the folder `games/TSConf/share`) is rescanned on every
   pick, so drop files into that folder and pick it again to see them.
 - **Use it in Wild Commander:** `Alt+F2` (right panel) or `Alt+F1` (left), choose
   `SD2: Z-Controller`. Browse, open `.trd` disks, play tunes. Everything is
@@ -135,11 +148,11 @@ you put there). They edit no other file; they never touch `user-startup.sh` or
 other cores' files.
 
 Settings (environment variables or the block at the top of
-`tsshare_start.sh`): `MODE` (`view`), `ZIPROOT`, `SHARED` (default `$ZIPROOT/shared`), `MOUNT` (view:
-`/media/fat/games/TSConf/share`, single: `/media/fat/tsshare`), `SRC` (single
+`tsshare_start.sh`): `MODE` (`view`), `ZIPROOT`, `SHARED` (default `$ZIPROOT/share`), `MOUNT` (view:
+`/media/fat/games/TSConf/virtualfs`, single: `/media/fat/tsshare`), `SRC` (single
 mode), `BIN`, `CACHE_MB` (32), `LABEL` (`TSSHARE`). Test hooks, used by
 `scripts/test_scripts.sh`: `CONF_DIR`, `LOG`, `PIDFILE`, `WAIT_SECS`, `MOUNTS_FILE`, `SCAN_PREFIX`. The start
-script waits up to 90 s for the mount and `shared.vhd` (`share.vhd` in single
+script waits up to 90 s for the mount and `share.vhd` (`share.vhd` in single
 mode), and stops early with the log tail if the daemon dies.
 
 ## Why `X.vhd` and not `X.zip`
@@ -157,15 +170,15 @@ browsing), never a disk.
 
 ## What view mode shows
 
-- Only folders, zips (as `.vhd`) and `shared.vhd` in the root of the mount. Other
+- Only folders, zips (as `.vhd`) and `share.vhd` in the root of the mount. Other
   files are not listed.
 - Hidden: names starting with a dot, symlinked folders, names containing `.zip`
-  (an `a.zip.bak` or a folder `x.zip`), the mount point itself and the shared
-  folder (which appears only as `shared.vhd`).
+  (an `a.zip.bak` or a folder `x.zip`), the mount point itself and the `share`
+  folder (which appears only as `share.vhd`).
 - If two entries would get the same name, the later one gets ` (2)`.
-- `shared.vhd` is a fixed name in the root: a folder with that name is hidden, and a
+- `share.vhd` is a fixed name in the root: a folder with that name is hidden, and a
   zip that would map to it gets the ` (2)` suffix.
-- The `shared` folder is rescanned each time it is opened (after the last handle
+- The `share` folder is rescanned each time it is opened (after the last handle
   closed). A zip is rebuilt when its size or modification time changed.
 
 ## Cost in view mode
@@ -201,7 +214,7 @@ browsing), never a disk.
 ## How it works
 
 1. One scan of the source builds an in-memory tree (name, size, mtime). (In
-   view mode this happens per zip or for the shared folder, when it is first
+   view mode this happens per zip or for the `share` folder, when it is first
    opened; items 2 to 9 then apply to each volume built that way.)
 2. A virtual disk is laid out from it: MBR, one FAT32 partition (type 0x0C)
    at sector 128, 2 FATs, no stored FAT table.
@@ -209,7 +222,7 @@ browsing), never a disk.
    directory, then each file's clusters in sorted order. A FAT sector is
    computed on demand from the extent table; directory sectors are generated
    from the tree (long names as UTF-16 entries plus an 8.3 alias).
-4. Reads of `share.vhd` (or `<name>.vhd`, `shared.vhd`) are answered from those pieces; file data comes from
+4. Reads of `share.vhd` (or `<name>.vhd`, `share.vhd`) are answered from those pieces; file data comes from
    the source (a directory file, a stored zip entry at its offset, or a
    deflated zip entry inflated into an in-memory LRU).
 5. Folder sources keep a small LRU of open file descriptors (`-fd-limit`).
@@ -240,7 +253,7 @@ tsshare -view <zip-root> [-shared <dir>] -mount <dir> [...] view mode
 | --- | --- | --- |
 | `-src` | required (or `-view`) | folder or `.zip` to share (single mode) |
 | `-view` | none | view mode: root folder whose zips appear as `<name>.vhd`; excludes `-src` |
-| `-shared` | `<view>/shared` | view mode: folder shown as `shared.vhd`; created if missing; the mount point must not lie inside it |
+| `-shared` | `<view>/share` | view mode: folder shown as `share.vhd`; created if missing; the mount point must not lie inside it |
 | `-max-volumes` | 2 | view mode: volumes alive at once (leased or being built), 1 to 3; more means more memory |
 | `-idle-min` | 10 | view mode: minutes an unused volume is kept; 1 to 1440 |
 | `-mount` | required | existing directory to mount on |
@@ -333,7 +346,7 @@ or Main_MiSTer waits on it (as root):
 mount -t fusectl none /sys/fs/fuse/connections   # if the directory is empty
 ls /sys/fs/fuse/connections                      # find the number N of the mount
 echo 1 > /sys/fs/fuse/connections/N/abort
-umount -l <MOUNT>     # /media/fat/games/TSConf/share, or /media/fat/tsshare in single mode
+umount -l <MOUNT>     # /media/fat/games/TSConf/virtualfs, or /media/fat/tsshare in single mode
 ```
 
 `tsshare_start.sh` mounts fusectl itself if it is not mounted. After `kill -9`
@@ -376,14 +389,14 @@ tests; the start/stop scripts through `scripts/test_scripts.sh`
 (non-root, `fusermount3`).
 
 View mode on the host: the Go unit and FUSE tests, and a script dry run
-(`scripts/test_scripts.sh`: start, `shared.vhd` and `<name>.vhd` present, no entry
+(`scripts/test_scripts.sh`: start, `share.vhd` and `<name>.vhd` present, no entry
 containing `.zip`, second start refused, stop unmounts, a missing zip root
 refused).
 
 View mode on the owner's board (2026-11-14, details in [docs/BOARD.md](docs/BOARD.md)):
-the picker lists `share` and the `.vhd` names; the 1.4 GB zip builds in 10 s on the
-first pick and Wild Commander lists it and plays a MOD from it; `shared.vhd`
-builds in milliseconds and shows its files; switching zip -> `shared` -> zip and
+the picker lists `virtualfs` (then called `share`; renamed 2026-11-16) and the `.vhd` names; the 1.4 GB zip builds in 10 s on the
+first pick and Wild Commander lists it and plays a MOD from it; `share.vhd`
+builds in milliseconds and shows its files; switching zip -> `share` -> zip and
 back works (the zip is reused from the cache, no rebuild) and reads still work;
 peak daemon RSS 43.7 MB with both volumes alive; a write attempt fails with "Not
 Enough Space!"; stop with an image mounted takes about 15 s and is clean; after a
@@ -432,7 +445,7 @@ NOT verified on the board:
 
 | Symptom | Check |
 | --- | --- |
-| `shared.vhd` or `<name>.vhd` not visible in the OSD picker (single mode: `share.vhd`) | Is the daemon up (`cat /media/fat/Scripts/.config/tsshare/tsshare.pid`, `ls /media/fat/games/TSConf/share`; single mode `/media/fat/tsshare`)? Read `tsshare.log`. Open the OSD again after the start (untested on the board whether the picker caches its listing). |
+| `share.vhd` or `<name>.vhd` not visible in the OSD picker (single mode: `share.vhd`) | Is the daemon up (`cat /media/fat/Scripts/.config/tsshare/tsshare.pid`, `ls /media/fat/games/TSConf/virtualfs`; single mode `/media/fat/tsshare`)? Read `tsshare.log`. Open the OSD again after the start (untested on the board whether the picker caches its listing). |
 | WC shows no card | Reset the core after mounting; check that the image is selected under SD2, not SD1. Check `tsshare.log` for `read error`; run with `-v -log` to see whether the core reads at all. |
 | Slow start | The scan walks every entry once: slow NAS metadata makes it slow (the real zip took 0.4 s on the host). The start script waits 90 s. A folder on a slow share can take longer; start from a shell to watch the log. |
 | `Transport endpoint is not connected` | The daemon died without unmounting. Run `tsshare_stop.sh` (or `umount -l <MOUNT>`). |

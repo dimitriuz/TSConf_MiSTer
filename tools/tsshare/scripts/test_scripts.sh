@@ -22,7 +22,7 @@ cleanup() {
 	fi
 	for h in $HELPERS; do kill -KILL "$h" 2>/dev/null; done
 	fusermount3 -uz "$MOUNT" 2>/dev/null
-	fusermount3 -uz "$T/vroot/share" 2>/dev/null
+	fusermount3 -uz "$T/vroot/virtualfs" 2>/dev/null
 	fusermount3 -uz "$T/vr2m" 2>/dev/null
 	fusermount3 -uz "$LONGMNT" 2>/dev/null
 	sleep 1
@@ -296,27 +296,27 @@ z.close()' "$1"
 		return 1
 	fi
 }
-VMOUNT="$T/vroot/share"
+VMOUNT="$T/vroot/virtualfs"
 vmounted() { grep -q " $VMOUNT fuse" /proc/mounts; }
 not_vmounted() { ! vmounted; }
 no_zip_name() { ! ls "$VMOUNT" "$VMOUNT"/* 2>/dev/null | grep -q '\.zip'; }
 mkdir -p "$T/vroot/sub"
 if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
-	VENV="MODE=view ZIPROOT=$T/vroot SHARED=$T/vroot/shared MOUNT=$VMOUNT"
+	VENV="MODE=view ZIPROOT=$T/vroot SHARED=$T/vroot/share MOUNT=$VMOUNT"
 	check "view: start (creates shared and mount)" 0 -- env $VENV sh "$START"
 	expect "view: summary" has "^View ready: pick in the OSD"
-	expect "view: OSD hint" has "Mount SD2 image -> share ->"
-	expect "view: OSD names" has "<name>.vhd or shared.vhd"
-	expect "view: created shared" has "Created folder: shared"
-	expect "view: created mount" has "Created folder: share"
+	expect "view: OSD hint" has "OSD: Mount SD2 image -> virtualfs ->"
+	expect "view: OSD names" has "<zip name>, or share (the folder)"
+	expect "view: created shared" has "Created folder: share"
+	expect "view: created mount" has "Created folder: virtualfs"
 	expect "view: no line over 60 columns" narrow
 	expect "view: mounted" vmounted
 	expect "view: pid file written" test -s "$PIDFILE"
-	expect "view: shared.vhd" test -e "$VMOUNT/shared.vhd"
+	expect "view: share.vhd" test -e "$VMOUNT/share.vhd"
 	expect "view: game.vhd" test -s "$VMOUNT/game.vhd"
 	expect "view: sub/inner.vhd" test -s "$VMOUNT/sub/inner.vhd"
 	expect "view: no entry contains .zip" no_zip_name
-	expect "view: mount point itself hidden" test ! -e "$VMOUNT/share"
+	expect "view: mount point itself hidden" test ! -e "$VMOUNT/virtualfs"
 	check "view: second start refuses" 1 -- env $VENV sh "$START"
 	expect "view: refusal message" has "already running"
 	expect "view: still mounted after refusal" vmounted
@@ -324,10 +324,10 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	expect "view: unmounted" not_vmounted
 	expect "view: pid file removed" no_pidfile
 	# existing folders are not announced; a file in shared is served
-	echo hi > "$T/vroot/shared/note.txt"
+	echo hi > "$T/vroot/share/note.txt"
 	check "view: restart" 0 -- env $VENV sh "$START"
 	expect "view: nothing created the second time" test -z "$(echo "$LAST" | grep Created)"
-	expect "view: shared.vhd after restart" test -e "$VMOUNT/shared.vhd"
+	expect "view: share.vhd after restart" test -e "$VMOUNT/share.vhd"
 	# stop finds the daemon whatever MODE and MOUNT say (default MOUNT is
 	# elsewhere, and the pid file names a live tsshare of another mount)
 	check "view: stop with MODE=single and the default MOUNT" 0 -- env -u MOUNT MODE=single sh "$STOP"
@@ -337,22 +337,22 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	expect "view: unmounted (restart)" not_vmounted
 	check "view: stop with nothing running" 0 -- env $VENV sh "$STOP"
 	# argument = zip root
-	check "view: zip root as argument" 0 -- env MODE=view SHARED="$T/vroot/shared" MOUNT="$VMOUNT" sh "$START" "$T/vroot"
+	check "view: zip root as argument" 0 -- env MODE=view SHARED="$T/vroot/share" MOUNT="$VMOUNT" sh "$START" "$T/vroot"
 	check "view: stop (argument)" 0 -- env $VENV sh "$STOP"
 	# a mount inside the shared folder is refused, nothing left behind
-	check "view: MOUNT inside SHARED refused" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vroot/shared" MOUNT="$T/vroot/shared/m" sh "$START"
+	check "view: MOUNT inside SHARED refused" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vroot/share" MOUNT="$T/vroot/share/m" sh "$START"
 	expect "view: inside-SHARED message" has "inside SHARED"
 	expect "view: inside-SHARED leaves no pid file" no_pidfile
 	# the daemon refuses a symlinked way in: its message reaches the log tail
-	ln -s "$T/vroot/shared" "$T/vlink"
-	check "view: MOUNT inside SHARED via symlink (daemon check)" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vlink" MOUNT="$T/vroot/shared/m2" sh "$START"
+	ln -s "$T/vroot/share" "$T/vlink"
+	check "view: MOUNT inside SHARED via symlink (daemon check)" 1 -- env MODE=view ZIPROOT="$T/vroot" SHARED="$T/vlink" MOUNT="$T/vroot/share/m2" sh "$START"
 	expect "view: daemon check leaves no pid file" no_pidfile
-	rm -rf "$T/vroot/shared/m" "$T/vroot/shared/m2"
+	rm -rf "$T/vroot/share/m" "$T/vroot/share/m2"
 	# SHARED follows ZIPROOT (here the argument, with trailing slashes)
 	mkdir -p "$T/vr2"; mkzip "$T/vr2/z.zip"
 	check "view: argument root, SHARED follows it" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$START" "$T/vr2//"
 	expect "view: summary names the root" has "^Viewing: vr2$"
-	expect "view: SHARED created under the argument root" test -d "$T/vr2/shared"
+	expect "view: SHARED created under the argument root" test -d "$T/vr2/share"
 	expect "view: z.vhd" test -e "$T/vr2m/z.vhd"
 	check "view: stop (argument root)" 0 -- env MODE=view MOUNT="$T/vr2m" sh "$STOP"
 	expect "view: unmounted (argument root)" test ! -e "$T/vr2m/z.vhd"
@@ -382,7 +382,7 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	LONGMNT="$R/mnt$LN"
 	check "long: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$R/zz" MOUNT="$LONGMNT" sh "$START"
 	expect "long: missing ZIPROOT narrow" narrow
-	check "long: MOUNT inside SHARED" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/zr/shared" MOUNT="$R/zr/shared/m" sh "$START"
+	check "long: MOUNT inside SHARED" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/zr/share" MOUNT="$R/zr/share/m" sh "$START"
 	expect "long: MOUNT inside SHARED narrow" narrow
 	check "long: start" 0 -- env MODE=view ZIPROOT="$R/zr" MOUNT="$LONGMNT" sh "$START"
 	expect "long: start narrow" narrow
@@ -393,11 +393,11 @@ if mkzip "$T/vroot/game.zip" && mkzip "$T/vroot/sub/inner.zip"; then
 	expect "long: stop narrow" narrow
 	expect "long: stop adopted the mount" has "Found the daemon"
 	# the daemon's refusal through a symlink: the END of its long message is shown
-	ln -s "$R/zr/shared" "$R/lnk"
-	check "long: daemon refuses (symlinked SHARED)" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/lnk" MOUNT="$R/zr/shared/m3" sh "$START"
+	ln -s "$R/zr/share" "$R/lnk"
+	check "long: daemon refuses (symlinked SHARED)" 1 -- env MODE=view ZIPROOT="$R/zr" SHARED="$R/lnk" MOUNT="$R/zr/share/m3" sh "$START"
 	expect "long: daemon refusal narrow" narrow
 	expect "long: log tail shows the end of the message" has "its own mount"
-	rm -rf "$R/zr/shared/m3"
+	rm -rf "$R/zr/share/m3"
 else
 	echo "skip: view tests (no python3 or zip)"
 fi
@@ -472,7 +472,7 @@ expect "garbage pid (start): stale" has "stale"
 expect "garbage pid (start): narrow" narrow
 sh "$STOP" > /dev/null 2>&1
 
-check "view: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/nozip" SHARED="$T/nozip/shared" MOUNT="$T/nozip/share" sh "$START"
+check "view: missing ZIPROOT" 1 -- env MODE=view ZIPROOT="$T/nozip" SHARED="$T/nozip/share" MOUNT="$T/nozip/virtualfs" sh "$START"
 expect "view: missing ZIPROOT message" has "folder not found"
 expect "view: missing ZIPROOT created nothing" test ! -e "$T/nozip"
 expect "view: missing ZIPROOT: no pid file" no_pidfile

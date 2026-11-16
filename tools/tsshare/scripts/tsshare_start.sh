@@ -2,21 +2,21 @@
 # tsshare_start.sh - start the tsshare daemon (MiSTer Scripts menu).
 #
 # MODE=view (default): $MOUNT shows every zip under $ZIPROOT as
-# <name>.vhd, plus shared.vhd (the folder $SHARED), read-only FAT32 disks.
-# Then, in the TSConf OSD: Mount SD2 image -> share -> <name>.vhd.
+# <name>.vhd, plus share.vhd (the folder $SHARED), read-only FAT32 disks.
+# Then, in the TSConf OSD: Mount SD2 image -> virtualfs -> <name>.vhd.
 # MODE=single: one folder or zip as share.vhd in $MOUNT.
 # Usage: tsshare_start.sh [zip-root-folder]    (single: [folder-or-zip])
 # The argument replaces ZIPROOT (view) or SRC (single). SHARED defaults to
-# $ZIPROOT/shared, after that replacement. Paths must be absolute.
+# $ZIPROOT/share, after that replacement. Paths must be absolute.
 # Touches only $MOUNT and $SHARED (view mode creates them) and the
 # files in $CONF_DIR.
 
 # ---- settings (edit here, or override with environment variables) ----
 MODE="${MODE:-view}"
 ZIPROOT="${ZIPROOT:-/media/fat/games/TSConf}"
-# SHARED: default $ZIPROOT/shared (set below, once ZIPROOT is final)
+# SHARED: default $ZIPROOT/share (set below, once ZIPROOT is final)
 SRC="${SRC:-/media/fat/games/Spectrum/compilations/AAA/SD.zip}"
-# MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare
+# MOUNT defaults: view /media/fat/games/TSConf/virtualfs, single /media/fat/tsshare
 CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 BIN="${BIN:-$CONF_DIR/tsshare}"
 CACHE_MB="${CACHE_MB:-32}"
@@ -41,11 +41,11 @@ esac
 ALT=
 if [ -z "$MOUNT" ]; then
 	if [ "$MODE" = view ]; then
-		MOUNT=/media/fat/games/TSConf/share
+		MOUNT=/media/fat/games/TSConf/virtualfs
 		ALT=/media/fat/tsshare
 	else
 		MOUNT=/media/fat/tsshare
-		ALT=/media/fat/games/TSConf/share
+		ALT=/media/fat/games/TSConf/virtualfs
 	fi
 fi
 # ---- END defaults ----
@@ -246,7 +246,7 @@ show_log() {
 need_abs MOUNT "$MOUNT"
 if [ "$MODE" = view ]; then
 	ZIPROOT="$(norm "$ZIPROOT")"
-	SHARED="$(norm "${SHARED:-$ZIPROOT/shared}")"
+	SHARED="$(norm "${SHARED:-$ZIPROOT/share}")"
 	need_abs ZIPROOT "$ZIPROOT"
 	need_abs SHARED "$SHARED"
 	[ "$ZIPROOT" != / ] || die "ZIPROOT must not be /"
@@ -269,7 +269,7 @@ else
 fi
 
 # the file that shows the daemon is serving
-if [ "$MODE" = view ]; then READY=shared.vhd; else READY=share.vhd; fi
+if [ "$MODE" = view ]; then READY=share.vhd; else READY=share.vhd; fi
 
 # one instance only
 if [ -f "$PIDFILE" ]; then
@@ -367,8 +367,8 @@ trap - INT TERM
 
 if [ "$MODE" = view ]; then
 	echo "View ready: pick in the OSD (${i}s, pid $PID)"
-	echo "Mount SD2 image -> ${MOUNT##*/} ->" | cut -c1-60
-	echo "  <name>.vhd or shared.vhd"
+	echo "OSD: Mount SD2 image -> ${MOUNT##*/} ->" | cut -c1-60
+	echo "  <zip name>, or share (the folder)"
 	echo "Log: $(short "$LOG")"
 	exit 0
 fi

@@ -71,6 +71,8 @@ sizes other than 4 KB; the abort recipe with `tsshare`.
 
 # View mode on the board (2026-11-14)
 
+> Naming: these runs used the old folder names. Since 2026-11-16 the mount window is `games/TSConf/virtualfs` (was `share`) and the real folder is `games/TSConf/share` (was `shared`, shown as `shared.vhd`, now `share.vhd`). Not re-run on the board after the rename.
+
 Binary: HEAD b10a5b7 static ARM build (md5 `cd7dfb17…`), scripts from the same commit. Board idle (`MENU`) before and after.
 Setup: `ZIPROOT=/media/fat/games/Spectrum/compilations/AAA` (`games/TSConf` holds no zips), `SHARED=/media/fat/games/TSConf/shared`
 (the script created `share/` and `shared/`; the owner had approved that), core `TSConf_dualsd_20261113`, image 1 a copy of

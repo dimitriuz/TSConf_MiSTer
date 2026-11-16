@@ -80,9 +80,9 @@ A small [example](releases/vhd-example.zip) VHD with preinstalled Wild Commander
 The optional [tsshare](tools/tsshare/README.md) daemon (a small static ARM binary, no change to Main_MiSTer or the core)
 turns a large zip or a folder on your NAS into a read-only virtual SD card, without copying anything to the SD card:
 
-1. Run `tsshare_start.sh` from the MiSTer Scripts menu. Zips under `games/TSConf` appear as `<name>.vhd`
-   and the folder `games/TSConf/shared` as `shared.vhd`, inside `games/TSConf/share`.
-2. In the TSConf OSD choose **Mount SD2 image**, open `share` and pick one. Wild Commander shows it as the SD2 drive
+1. Run `tsshare_start.sh` from the MiSTer Scripts menu. It makes `games/TSConf/virtualfs`, an empty "window" that lists a card
+   for every zip under `games/TSConf`, plus one for the real folder `games/TSConf/share` (put loose files there).
+2. In the TSConf OSD choose **Mount SD2 image**, open `virtualfs` and pick a zip or `share`. Wild Commander shows it as the SD2 drive
    (`Alt+F1` / `Alt+F2`, `SD2: Z-Controller`).
 
 A zip with tens of thousands of files opens in about 10 s on the board and the daemon stays under 50 MB.

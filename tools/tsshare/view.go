@@ -1,7 +1,7 @@
 package main
 
 // View mode: a FUSE tree that mirrors a zip root. Every directory is shown as
-// a directory, every *.zip as <name>.vhd, and the shared folder as shared.vhd.
+// a directory, every *.zip as <name>.vhd, and the shared folder as share.vhd.
 // A file's content is a virtual FAT32 disk built (by the Manager) when the
 // file is opened.
 //
@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	sharedName     = "shared.vhd"
+	sharedName     = "share.vhd"
 	defaultListTTL = 5 * time.Second
 	dirTimeout     = time.Second
 	maxListCache   = 256
@@ -161,7 +161,7 @@ var defaultLister = &lister{}
 // shownEntries lists dir for the view: sub-directories (not symlinks, not
 // hidden, no ".zip" in the name, not in excl) and the zips as shown names. excl
 // are resolved absolute paths. reserved names (case-insensitive, e.g.
-// "shared.vhd") are taken: a directory with such a name is hidden and a zip
+// "share.vhd") are taken: a directory with such a name is hidden and a zip
 // mapping to it gets a numeric suffix. Results are cached for ttl (0 = not).
 // The order is by real name (case-insensitive, then bytewise), so a name maps
 // to the same zip on every call.
@@ -548,7 +548,7 @@ func (d *viewDir) Link(ctx context.Context, target fs.InodeEmbedder, name string
 	return nil, syscall.EROFS
 }
 
-// viewFile is a disk image file: a zip (as X.vhd) or shared.vhd.
+// viewFile is a disk image file: a zip (as X.vhd) or share.vhd.
 type viewFile struct {
 	fs.Inode
 	v      *viewShared
@@ -744,7 +744,7 @@ func runView(sd *shutdown, c viewConfig) {
 		fatal("bad -view %s: %v", c.zipRoot, err)
 	}
 	if c.shared == "" {
-		c.shared = filepath.Join(c.zipRoot, "shared")
+		c.shared = filepath.Join(c.zipRoot, "share")
 	}
 	if resolvePath(c.zipRoot) == resolvePath(c.mount) {
 		fatal("-mount must not be the -view folder itself")
@@ -753,7 +753,7 @@ func runView(sd *shutdown, c viewConfig) {
 		if err := os.MkdirAll(c.shared, 0o755); err != nil {
 			fatal("cannot create -shared %s: %v", c.shared, err)
 		}
-		fmt.Fprintf(os.Stderr, "view: created shared folder %s\n", c.shared)
+		fmt.Fprintf(os.Stderr, "view: created share folder %s\n", c.shared)
 	} else if st, _ := os.Stat(c.shared); !st.IsDir() {
 		fatal("bad -shared %s: not a directory", c.shared)
 	}

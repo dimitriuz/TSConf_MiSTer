@@ -41,7 +41,7 @@ func TestViewName(t *testing.T) {
 		{"not a zip", nil, []step{{"x.vhd", ""}, {"x.zip.d", ""}, {"zip", ""}, {"x.7z", ""}, {"X.ZIPP", ""}}},
 		{"unicode", nil, []step{{"Игра.zip", "Игра.vhd"}, {"игра.ZIP", "игра (2).vhd"}, {"日本 語.zip", "日本 語.vhd"}}},
 		{"taken by a directory", []string{"games.vhd"}, []step{{"games.zip", "games (2).vhd"}, {"Games.zip", "Games (3).vhd"}}},
-		{"taken by shared", []string{"shared.vhd"}, []step{{"shared.zip", "shared (2).vhd"}, {"SHARED.ZIP", "SHARED (3).vhd"}}},
+		{"taken by shared", []string{"share.vhd"}, []step{{"share.zip", "share (2).vhd"}, {"SHARE.ZIP", "SHARE (3).vhd"}}},
 		{"suffix already taken", []string{"a (2).vhd"}, []step{{"a.zip", "a.vhd"}, {"A.zip", "A (3).vhd"}}},
 	}
 	for _, c := range cases {
@@ -111,7 +111,7 @@ func TestShownEntries(t *testing.T) {
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
 	small := map[string][]byte{"a.txt": []byte("a")}
-	for _, d := range []string{"games", "Docs", "foo.zip.d", ".hidden", "mnt", "shared", "shared.vhd", "real", "Docs.VHD"} {
+	for _, d := range []string{"games", "Docs", "foo.zip.d", ".hidden", "mnt", "share", "share.vhd", "real", "Docs.VHD"} {
 		os.MkdirAll(filepath.Join(root, d), 0o755)
 	}
 	os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "linkdir"))
@@ -120,22 +120,22 @@ func TestShownEntries(t *testing.T) {
 	writeZipFile(t, filepath.Join(root, "A.ZIP"), small)
 	writeZipFile(t, filepath.Join(root, "x.zip.zip"), small)
 	writeZipFile(t, filepath.Join(root, ".x.zip"), small)
-	writeZipFile(t, filepath.Join(root, "shared.zip"), small)
+	writeZipFile(t, filepath.Join(root, "share.zip"), small)
 	writeZipFile(t, filepath.Join(root, "docs.zip"), small)
-	writeZipFile(t, filepath.Join(root, "shared", "inner.zip"), small)
+	writeZipFile(t, filepath.Join(root, "share", "inner.zip"), small)
 	mkfile(t, filepath.Join(root, "plain.vhd"), []byte("x"))
 	mkfile(t, filepath.Join(root, "notes.txt"), []byte("x"))
 	os.Symlink(filepath.Join(root, "SD.zip"), filepath.Join(root, "link.zip"))
 	os.Symlink(filepath.Join(root, "nowhere.zip"), filepath.Join(root, "dangling.zip"))
 
-	excl := []string{filepath.Join(root, "mnt"), filepath.Join(root, "shared")}
-	es, err := shownEntries(root, excl, 0, "shared.vhd")
+	excl := []string{filepath.Join(root, "mnt"), filepath.Join(root, "share")}
+	es, err := shownEntries(root, excl, 0, "share.vhd")
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(shownNames(es), "|")
 	// directories first (sorted case-insensitively), then zips in real-name order
-	want := "Docs|Docs.VHD|games|real|A.vhd|a (2).vhd|docs (2).vhd|link.vhd|SD.vhd|shared (2).vhd"
+	want := "Docs|Docs.VHD|games|real|A.vhd|a (2).vhd|docs (2).vhd|link.vhd|SD.vhd|share (2).vhd"
 	if got != want {
 		t.Fatalf("shown\n got %s\nwant %s", got, want)
 	}
@@ -150,14 +150,14 @@ func TestShownEntries(t *testing.T) {
 		t.Errorf("entry %+v", e)
 	}
 	// a second scan maps the same way
-	es2, _ := shownEntries(root, excl, 0, "shared.vhd")
+	es2, _ := shownEntries(root, excl, 0, "share.vhd")
 	if strings.Join(shownNames(es2), "|") != want {
 		t.Errorf("mapping not deterministic: %v", shownNames(es2))
 	}
 	// without exclusions the mount dir and shared dir show up
 	es3, _ := shownEntries(root, nil, 0)
 	g3 := strings.Join(shownNames(es3), "|")
-	for _, n := range []string{"mnt", "shared", "shared.vhd"} {
+	for _, n := range []string{"mnt", "share", "share.vhd"} {
 		if !strings.Contains("|"+g3+"|", "|"+n+"|") {
 			t.Errorf("%q missing without exclusion: %s", n, g3)
 		}
@@ -281,14 +281,14 @@ func newViewEnv(t *testing.T, extra ...string) *viewEnv {
 	writeZipFile(t, filepath.Join(root, "b.zip"), bFiles)
 	writeZipFile(t, filepath.Join(root, "sub", "c.zip"), bFiles)
 	for p, b := range sFiles {
-		mkfile(t, filepath.Join(root, "shared", p), b)
+		mkfile(t, filepath.Join(root, "share", p), b)
 	}
-	mnt := filepath.Join(root, "share")
+	mnt := filepath.Join(root, "virtualfs")
 	if err := os.Mkdir(mnt, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	args := append([]string{"-view", root, "-mount", mnt}, extra...)
-	e := &viewEnv{root: root, shared: filepath.Join(root, "shared"), mnt: mnt}
+	e := &viewEnv{root: root, shared: filepath.Join(root, "share"), mnt: mnt}
 	e.d = startView(t, mnt, root, args...)
 	return e
 }
@@ -352,7 +352,7 @@ func TestViewMountListsAndReads(t *testing.T) {
 	needTool(t, "fsck.vfat", "mdir", "mcopy", "dd")
 	e := newViewEnv(t)
 	got := dirNames(t, e.mnt)
-	want := []string{"A.vhd", "b.vhd", "shared.vhd", "sub"}
+	want := []string{"A.vhd", "b.vhd", "share.vhd", "sub"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("root listing %q, want %q", got, want)
 	}
@@ -369,8 +369,8 @@ func TestViewMountListsAndReads(t *testing.T) {
 	checkDisk(t, e.p("A.vhd"), aFiles)
 	checkDisk(t, e.p("b.vhd"), bFiles)
 	checkDisk(t, e.p("sub/c.vhd"), bFiles)
-	checkDisk(t, e.p("shared.vhd"), sFiles)
-	for _, n := range []string{"share", "shared", "A.zip", "b.zip"} {
+	checkDisk(t, e.p("share.vhd"), sFiles)
+	for _, n := range []string{"virtualfs", "share", "A.zip", "b.zip"} {
 		if _, err := os.Lstat(e.p(n)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s should not exist: %v", n, err)
 		}
@@ -433,17 +433,17 @@ func TestViewSizes(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// shared.vhd: 0 before any open, the built size while open
-	if st, err := os.Stat(e.p("shared.vhd")); err != nil || st.Size() != 0 {
-		t.Fatalf("shared.vhd before open: %v %v", st, err)
+	// share.vhd: 0 before any open, the built size while open
+	if st, err := os.Stat(e.p("share.vhd")); err != nil || st.Size() != 0 {
+		t.Fatalf("share.vhd before open: %v %v", st, err)
 	}
-	sf, err := os.Open(e.p("shared.vhd"))
+	sf, err := os.Open(e.p("share.vhd"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sf.Close()
 	if st, err := sf.Stat(); err != nil || st.Size() <= 0 {
-		t.Fatalf("shared.vhd after open: %v %v", st, err)
+		t.Fatalf("share.vhd after open: %v %v", st, err)
 	}
 }
 
@@ -459,14 +459,14 @@ func TestViewReopenRescan(t *testing.T) {
 		}
 		return false
 	}
-	if has(e.p("shared.vhd"), "new.txt") {
+	if has(e.p("share.vhd"), "new.txt") {
 		t.Fatal("new.txt present too early")
 	}
 	mkfile(t, filepath.Join(e.shared, "new.txt"), []byte("brand new\n"))
-	if !has(e.p("shared.vhd"), "new.txt") {
+	if !has(e.p("share.vhd"), "new.txt") {
 		t.Fatal("new.txt missing after reopen")
 	}
-	if g := mcopyOut(t, e.p("shared.vhd"), "::new.txt"); string(g) != "brand new\n" {
+	if g := mcopyOut(t, e.p("share.vhd"), "::new.txt"); string(g) != "brand new\n" {
 		t.Fatalf("new.txt = %q", g)
 	}
 	// a zip modified on disk
@@ -539,8 +539,8 @@ func TestViewSwitch(t *testing.T) {
 	if a1 != a2 || b1 != b2 {
 		t.Fatal("content changed after switching")
 	}
-	if hashFile(t, e.p("shared.vhd")) != hashFile(t, e.p("shared.vhd")) {
-		t.Fatal("shared.vhd not stable")
+	if hashFile(t, e.p("share.vhd")) != hashFile(t, e.p("share.vhd")) {
+		t.Fatal("share.vhd not stable")
 	}
 }
 
@@ -553,7 +553,7 @@ func TestViewReadOnly(t *testing.T) {
 			t.Errorf("%s: %v, want EROFS or EACCES", what, err)
 		}
 	}
-	for _, n := range []string{"A.vhd", "shared.vhd"} {
+	for _, n := range []string{"A.vhd", "share.vhd"} {
 		_, err := os.OpenFile(e.p(n), os.O_WRONLY, 0)
 		ro("open O_WRONLY "+n, err)
 		_, err = os.OpenFile(e.p(n), os.O_RDWR, 0)
@@ -586,7 +586,7 @@ func TestViewBusy(t *testing.T) {
 	}{{"default 2", nil, 2}, {"max-volumes 3", []string{"-max-volumes", "3"}, 3}, {"max-volumes 1", []string{"-max-volumes", "1"}, 1}} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newViewEnv(t, tc.extra...)
-			names := []string{"A.vhd", "b.vhd", "sub/c.vhd", "shared.vhd"}
+			names := []string{"A.vhd", "b.vhd", "sub/c.vhd", "share.vhd"}
 			var open []*os.File
 			for _, n := range names[:tc.n] {
 				f, err := os.Open(e.p(n))
@@ -635,43 +635,43 @@ func TestViewNeverRecurses(t *testing.T) {
 		root := filepath.Join(tmp, name)
 		writeZipFile(t, filepath.Join(root, "A.zip"), aFiles)
 		os.MkdirAll(filepath.Join(root, "sub", "m"), 0o755)
-		os.MkdirAll(filepath.Join(root, "share"), 0o755)
+		os.MkdirAll(filepath.Join(root, "virtualfs"), 0o755)
 		return root
 	}
 	check := func(t *testing.T, mnt string, nested bool) {
 		t.Helper()
 		got := dirNames(t, mnt)
 		for _, n := range got {
-			if n == "share" || n == "shared" {
+			if n == "virtualfs" || n == "share" {
 				t.Errorf("mount listing shows %q: %v", n, got)
 			}
 		}
-		if strings.Join(got, "|") != "A.vhd|shared.vhd|sub" {
+		if strings.Join(got, "|") != "A.vhd|share.vhd|sub" {
 			t.Errorf("listing %v", got)
 		}
 		sub := dirNames(t, filepath.Join(mnt, "sub"))
 		if nested && len(sub) != 0 {
 			t.Errorf("sub shows %v; the mount point sub/m must be hidden", sub)
 		}
-		if _, err := os.Lstat(filepath.Join(mnt, "share")); err == nil {
+		if _, err := os.Lstat(filepath.Join(mnt, "virtualfs")); err == nil {
 			t.Error("share is reachable inside the mount")
 		}
 	}
 	t.Run("absolute", func(t *testing.T) {
 		root := mk("abs")
-		mnt := filepath.Join(root, "share")
+		mnt := filepath.Join(root, "virtualfs")
 		startView(t, mnt, root, "-view", root, "-mount", mnt)
 		check(t, mnt, false)
 	})
 	t.Run("relative", func(t *testing.T) {
 		root := mk("rel")
-		startView(t, "share", root, "-view", ".", "-mount", "share")
-		check(t, filepath.Join(root, "share"), false)
+		startView(t, "virtualfs", root, "-view", ".", "-mount", "virtualfs")
+		check(t, filepath.Join(root, "virtualfs"), false)
 	})
 	t.Run("relative dotdot", func(t *testing.T) {
 		root := mk("rel2")
-		startView(t, "../share", filepath.Join(root, "sub"), "-view", "..", "-mount", "../share")
-		check(t, filepath.Join(root, "share"), false)
+		startView(t, "../virtualfs", filepath.Join(root, "sub"), "-view", "..", "-mount", "../virtualfs")
+		check(t, filepath.Join(root, "virtualfs"), false)
 	})
 	t.Run("symlinked mount", func(t *testing.T) {
 		root := mk("sym")
@@ -679,9 +679,9 @@ func TestViewNeverRecurses(t *testing.T) {
 		if err := os.Symlink(root, link); err != nil {
 			t.Fatal(err)
 		}
-		mnt := filepath.Join(link, "share")
+		mnt := filepath.Join(link, "virtualfs")
 		startView(t, mnt, root, "-view", root, "-mount", mnt)
-		check(t, filepath.Join(root, "share"), false)
+		check(t, filepath.Join(root, "virtualfs"), false)
 	})
 	t.Run("symlinked zip root", func(t *testing.T) {
 		root := mk("symroot")
@@ -689,7 +689,7 @@ func TestViewNeverRecurses(t *testing.T) {
 		if err := os.Symlink(root, link); err != nil {
 			t.Fatal(err)
 		}
-		mnt := filepath.Join(root, "share")
+		mnt := filepath.Join(root, "virtualfs")
 		startView(t, mnt, root, "-view", link, "-mount", mnt)
 		check(t, mnt, false)
 	})
@@ -698,7 +698,7 @@ func TestViewNeverRecurses(t *testing.T) {
 		mnt := filepath.Join(root, "sub", "m")
 		startView(t, mnt, root, "-view", root, "-mount", mnt)
 		got := dirNames(t, mnt)
-		if strings.Join(got, "|") != "A.vhd|share|shared.vhd|sub" {
+		if strings.Join(got, "|") != "A.vhd|share.vhd|sub|virtualfs" {
 			t.Errorf("listing %v", got)
 		}
 		check2 := dirNames(t, filepath.Join(mnt, "sub"))
@@ -807,13 +807,13 @@ func TestViewFlags(t *testing.T) {
 
 	// default shared folder is created
 	d := startView(t, mnt, root, "-view", root, "-mount", mnt, "-idle-min", "1")
-	if st, err := os.Stat(filepath.Join(root, "shared")); err != nil || !st.IsDir() {
+	if st, err := os.Stat(filepath.Join(root, "share")); err != nil || !st.IsDir() {
 		t.Errorf("default shared folder not created: %v", err)
 	}
 	if !strings.Contains(d.sb.String(), "view: up to 2 volumes alive") {
 		t.Errorf("no volume limit line:\n%s", d.sb)
 	}
-	if !strings.Contains(d.sb.String(), "created shared folder") {
+	if !strings.Contains(d.sb.String(), "created share folder") {
 		t.Errorf("no creation line:\n%s", d.sb)
 	}
 	d.stop(t)
@@ -845,7 +845,7 @@ func TestViewListingScanOnce(t *testing.T) {
 	for _, n := range []string{"a.zip", "b.zip", "c.zip"} {
 		writeZipFile(t, filepath.Join(root, n), aFiles)
 	}
-	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Second)
+	d, _ := newTestView(t, root, filepath.Join(root, "share"), filepath.Join(root, "virtualfs"), time.Second)
 	var scans atomic.Int32
 	orig := d.v.ls.scan
 	d.v.ls.scanFn = func(dir string, excl, res []string) ([]viewEntry, error) {
@@ -898,7 +898,7 @@ func TestViewListingSlowScan(t *testing.T) {
 	root := t.TempDir()
 	writeZipFile(t, filepath.Join(root, "a.zip"), aFiles)
 	ttl := 200 * time.Millisecond
-	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), ttl)
+	d, _ := newTestView(t, root, filepath.Join(root, "share"), filepath.Join(root, "virtualfs"), ttl)
 	var scans atomic.Int32
 	orig := d.v.ls.scan
 	d.v.ls.scanFn = func(dir string, excl, res []string) ([]viewEntry, error) {
@@ -935,7 +935,7 @@ func TestViewLookupLarge(t *testing.T) {
 		}
 		f.Close()
 	}
-	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Minute)
+	d, _ := newTestView(t, root, filepath.Join(root, "share"), filepath.Join(root, "virtualfs"), time.Minute)
 	if _, errno := d.Readdir(context.Background()); errno != 0 {
 		t.Fatal(errno)
 	}
@@ -959,12 +959,12 @@ func TestViewSharedMtime(t *testing.T) {
 	needFuse(t)
 	e := newViewEnv(t)
 	want, _ := os.Stat(e.shared)
-	st, err := os.Stat(e.p("shared.vhd"))
+	st, err := os.Stat(e.p("share.vhd"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st.ModTime().Year() < 2000 || st.ModTime().Sub(want.ModTime()).Abs() > time.Second {
-		t.Fatalf("shared.vhd mtime %v, shared dir %v", st.ModTime(), want.ModTime())
+		t.Fatalf("share.vhd mtime %v, shared dir %v", st.ModTime(), want.ModTime())
 	}
 	if got := sharedMtime(filepath.Join(e.root, "nonexistent")); !got.Equal(fallbackMtime) {
 		t.Fatalf("fallback %v", got)
@@ -1019,7 +1019,7 @@ func TestViewNameLength(t *testing.T) {
 func TestViewMountInShared(t *testing.T) {
 	needFuse(t)
 	root := t.TempDir()
-	sh := filepath.Join(root, "shared")
+	sh := filepath.Join(root, "share")
 	mnt := filepath.Join(sh, "m")
 	os.MkdirAll(mnt, 0o755)
 	for _, mt := range []string{mnt, sh} {
@@ -1037,7 +1037,7 @@ func TestViewDirectIOAndInterrupt(t *testing.T) {
 	root := t.TempDir()
 	zp := filepath.Join(root, "a.zip")
 	writeZipFile(t, zp, aFiles)
-	d, m := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), time.Second)
+	d, m := newTestView(t, root, filepath.Join(root, "share"), filepath.Join(root, "virtualfs"), time.Second)
 	f := &viewFile{v: d.v, name: "a.vhd", real: zp}
 	h, fl, errno := f.Open(context.Background(), syscall.O_RDONLY)
 	if errno != 0 {
@@ -1085,7 +1085,7 @@ func TestViewGetattrUsesListingCache(t *testing.T) {
 	writeZipFile(t, zp, aFiles)
 	zst, _ := os.Stat(zp)
 	ttl := 400 * time.Millisecond
-	d, _ := newTestView(t, root, filepath.Join(root, "shared"), filepath.Join(root, "share"), ttl)
+	d, _ := newTestView(t, root, filepath.Join(root, "share"), filepath.Join(root, "virtualfs"), ttl)
 	var stats atomic.Int32
 	d.v.statFn = func(p string) (os.FileInfo, error) { stats.Add(1); return os.Stat(p) }
 	f := &viewFile{v: d.v, parent: d, name: "a.vhd", real: zp}
@@ -1237,14 +1237,14 @@ func TestViewSpecialFiles(t *testing.T) {
 	}
 	os.Mkdir(filepath.Join(root, "x.zip"), 0o755)
 	writeZipFile(t, filepath.Join(root, "x.zip", "inner.zip"), aFiles)
-	mnt := filepath.Join(root, "share")
+	mnt := filepath.Join(root, "virtualfs")
 	os.Mkdir(mnt, 0o755)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		startView(t, mnt, root, "-view", root, "-mount", mnt)
 		got := dirNames(t, mnt)
-		if strings.Join(got, "|") != "good.vhd|shared.vhd" {
+		if strings.Join(got, "|") != "good.vhd|share.vhd" {
 			t.Errorf("listing %v", got)
 		}
 		for _, n := range []string{"pipe.vhd", "sock.vhd", "dev.vhd", "x.vhd", "plainpipe", "pipe.zip"} {

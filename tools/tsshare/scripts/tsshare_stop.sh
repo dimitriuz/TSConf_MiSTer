@@ -10,7 +10,7 @@ CONF_DIR="${CONF_DIR:-/media/fat/Scripts/.config/tsshare}"
 PIDFILE="${PIDFILE:-$CONF_DIR/tsshare.pid}"
 WAIT_SECS="${WAIT_SECS:-10}"
 # MOUNTS_FILE: see the lib below
-# MOUNT defaults: view /media/fat/games/TSConf/share, single /media/fat/tsshare.
+# MOUNT defaults: view /media/fat/games/TSConf/virtualfs, single /media/fat/tsshare.
 # The daemon is found by its own command line, so MODE and MOUNT only
 # matter for cleaning up a mount whose daemon is dead.
 # SCAN_PREFIX: see the lib.
@@ -142,11 +142,11 @@ esac
 ALT=
 if [ -z "$MOUNT" ]; then
 	if [ "$MODE" = view ]; then
-		MOUNT=/media/fat/games/TSConf/share
+		MOUNT=/media/fat/games/TSConf/virtualfs
 		ALT=/media/fat/tsshare
 	else
 		MOUNT=/media/fat/tsshare
-		ALT=/media/fat/games/TSConf/share
+		ALT=/media/fat/games/TSConf/virtualfs
 	fi
 fi
 # ---- END defaults ----

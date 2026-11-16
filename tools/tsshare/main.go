@@ -226,7 +226,7 @@ func (sd *shutdown) abortIfCancelled() {
 func main() {
 	src := flag.String("src", "", "directory or zip file to share (single-source mode; or use -view)")
 	view := flag.String("view", "", "view mode: root folder whose zips are shown as <name>.vhd, built when opened")
-	shared := flag.String("shared", "", "view mode: folder shown as shared.vhd (default <view>/shared, created if missing)")
+	shared := flag.String("shared", "", "view mode: folder shown as share.vhd (default <view>/share, created if missing)")
 	idleMin := flag.Int("idle-min", 10, "view mode: minutes an unused volume is kept, 1 to 1440")
 	maxVols := flag.Int("max-volumes", 2, "view mode: volumes alive at once, 1 to 3 (each holds a tree of up to about 47 MB)")
 	mnt := flag.String("mount", "", "mount point directory (required)")

@@ -751,15 +751,15 @@ func runView(sd *shutdown, c viewConfig) {
 	}
 	if _, err := os.Stat(c.shared); err != nil {
 		if err := os.MkdirAll(c.shared, 0o755); err != nil {
-			fatal("cannot create -shared %s: %v", c.shared, err)
+			fatal("cannot create -share %s: %v", c.shared, err)
 		}
 		fmt.Fprintf(os.Stderr, "view: created share folder %s\n", c.shared)
 	} else if st, _ := os.Stat(c.shared); !st.IsDir() {
-		fatal("bad -shared %s: not a directory", c.shared)
+		fatal("bad -share %s: not a directory", c.shared)
 	}
 
 	if rm, rs := resolvePath(c.mount), resolvePath(c.shared); rm == rs || strings.HasPrefix(rm, rs+string(filepath.Separator)) {
-		fatal("-mount %s lies inside the -shared folder %s; the shared disk would contain its own mount", c.mount, c.shared)
+		fatal("-mount %s lies inside the -share folder %s; the shared disk would contain its own mount", c.mount, c.shared)
 	}
 
 	var rl *readLog

@@ -325,7 +325,7 @@ mkdir -p "$CONF_DIR" || die "cannot create" "$CONF_DIR"
 if [ "$MODE" = view ]; then
 	echo "Viewing: ${ZIPROOT##*/}" | cut -c1-60
 	echo "Starting (up to ${WAIT_SECS}s)..."
-	setsid nohup "$BIN" -view "$ZIPROOT" -shared "$SHARED" -mount "$MOUNT" \
+	setsid nohup "$BIN" -view "$ZIPROOT" -share "$SHARED" -mount "$MOUNT" \
 		-cache-mb "$CACHE_MB" -label "$LABEL" > "$LOG" 2>&1 < /dev/null &
 else
 	echo "Sharing: ${SRC##*/}" | cut -c1-60

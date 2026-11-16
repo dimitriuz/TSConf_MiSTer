@@ -246,14 +246,14 @@ browsing), never a disk.
 
 ```
 tsshare -src <dir|zip> -mount <dir> [options]               single mode
-tsshare -view <zip-root> [-shared <dir>] -mount <dir> [...] view mode
+tsshare -view <zip-root> [-share <dir>] -mount <dir> [...] view mode
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-src` | required (or `-view`) | folder or `.zip` to share (single mode) |
 | `-view` | none | view mode: root folder whose zips appear as `<name>.vhd`; excludes `-src` |
-| `-shared` | `<view>/share` | view mode: folder shown as `share.vhd`; created if missing; the mount point must not lie inside it |
+| `-share` | `<view>/share` | view mode: folder shown as `share.vhd`; created if missing; the mount point must not lie inside it |
 | `-max-volumes` | 2 | view mode: volumes alive at once (leased or being built), 1 to 3; more means more memory |
 | `-idle-min` | 10 | view mode: minutes an unused volume is kept; 1 to 1440 |
 | `-mount` | required | existing directory to mount on |

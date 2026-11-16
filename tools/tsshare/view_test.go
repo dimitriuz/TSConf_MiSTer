@@ -794,15 +794,15 @@ func TestViewFlags(t *testing.T) {
 	if c, _ := run("-view", root, "-mount", filepath.Join(root, "nomount")); c != 2 {
 		t.Errorf("missing mount dir: exit %d", c)
 	}
-	if c, _ := run("-shared", root, "-src", src, "-mount", mnt); c != 2 {
-		t.Errorf("-shared without -view: exit %d", c)
+	if c, _ := run("-share", root, "-src", src, "-mount", mnt); c != 2 {
+		t.Errorf("-share without -view: exit %d", c)
 	}
 	mkfile(t, filepath.Join(root, "afile"), []byte("x"))
-	if c, _ := run("-view", root, "-shared", filepath.Join(root, "afile"), "-mount", mnt); c != 2 {
-		t.Errorf("-shared is a file: exit %d", c)
+	if c, _ := run("-view", root, "-share", filepath.Join(root, "afile"), "-mount", mnt); c != 2 {
+		t.Errorf("-share is a file: exit %d", c)
 	}
-	if c, _ := run("-view", root, "-shared", filepath.Join(root, "afile", "x"), "-mount", mnt); c != 2 {
-		t.Errorf("-shared cannot be created: exit %d", c)
+	if c, _ := run("-view", root, "-share", filepath.Join(root, "afile", "x"), "-mount", mnt); c != 2 {
+		t.Errorf("-share cannot be created: exit %d", c)
 	}
 
 	// default shared folder is created
@@ -821,9 +821,9 @@ func TestViewFlags(t *testing.T) {
 	sh := filepath.Join(t.TempDir(), "a", "b", "myshared")
 	mnt2 := filepath.Join(t.TempDir(), "m")
 	os.Mkdir(mnt2, 0o755)
-	d = startView(t, mnt2, root, "-view", root, "-shared", sh, "-mount", mnt2)
+	d = startView(t, mnt2, root, "-view", root, "-share", sh, "-mount", mnt2)
 	if st, err := os.Stat(sh); err != nil || !st.IsDir() {
-		t.Errorf("-shared not created: %v", err)
+		t.Errorf("-share not created: %v", err)
 	}
 	if !strings.Contains(d.sb.String(), "view: shared folder "+sh) {
 		t.Errorf("startup lines:\n%s", d.sb)
@@ -1023,11 +1023,11 @@ func TestViewMountInShared(t *testing.T) {
 	mnt := filepath.Join(sh, "m")
 	os.MkdirAll(mnt, 0o755)
 	for _, mt := range []string{mnt, sh} {
-		cmd := exec.Command(daemonBin, "-view", root, "-shared", sh, "-mount", mt)
+		cmd := exec.Command(daemonBin, "-view", root, "-share", sh, "-mount", mt)
 		var sb syncBuf
 		cmd.Stderr = &sb
 		err := cmd.Run()
-		if exitCode(err) != 2 || !strings.Contains(sb.String(), "-shared") {
+		if exitCode(err) != 2 || !strings.Contains(sb.String(), "-share") {
 			t.Errorf("mount %s: exit %d\n%s", mt, exitCode(err), sb.String())
 		}
 	}
